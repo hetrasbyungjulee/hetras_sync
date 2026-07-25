@@ -77,9 +77,20 @@ def get_store_list(headers):
     if res.status_code != 200:
         print(f'⚠️ 매장 목록 조회 실패: {res.status_code}')
         return {}
+    
+    raw = res.json()
+    # 응답이 리스트일 수도, {"data": [...]} 형태일 수도 있음
+    if isinstance(raw, list):
+        store_items = raw
+    elif isinstance(raw, dict):
+        store_items = raw.get('data', [])
+    else:
+        store_items = []
+    
     stores = {}
-    for s in res.json().get('data', []):
-        stores[norm(s.get('name',''))] = s.get('idx')
+    for s in store_items:
+        if isinstance(s, dict):
+            stores[norm(s.get('name',''))] = s.get('idx')
     print(f'📍 매장 {len(stores)}개 조회됨: {list(stores.keys())}')
     return stores
 
