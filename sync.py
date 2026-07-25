@@ -95,45 +95,82 @@ def get_store_list(headers):
     return stores
 
 # ── 4. 재고 전체 조회 ─────────────────────────────────
-def get_all_stock(headers):
+def get_all_stock(headers, store_list):
     print('📦 재고 데이터 조회 중...')
+    idx_to_store = {v: k for k, v in store_list.items()}
     all_stock = []
     page = 1
     per_page = 100
-    
+
     while True:
         res = requests.get(
             f'{BASE_URL}/product/variant/stock',
-            params={
-                'page': page,
-                'perPage': per_page,
-            },
+            params={'page': page, 'perPage': per_page},
             headers=headers
         )
         if res.status_code != 200:
             print(f'⚠️ 재고 조회 실패 (page {page}): {res.status_code}')
             break
-        
+
         data = res.json()
-        items = data.get('data', [])
+        if isinstance(data, list):
+            items = data
+            last_page = 1
+        else:
+            items = data.get('data', [])
+            last_page = data.get('meta', {}).get('last_page', 1)
+
         if not items:
             break
-        
-        all_stock.extend(items)
-        
-        meta = data.get('meta', {})
-        last_page = meta.get('last_page', 1)
+
+        for item in items:
+            variant = item or {}
+            # 바코드 추출
+            barcode = str((variant.get('barcode') or {}).get('code1', '') or '').strip()
+            if not barcode or barcode == 'None':
+                barcode = str(variant.get('code1', '') or '').strip()
+            if not barcode:
+                continue
+
+            product_name = ((variant.get('product') or {}).get('name', '') or
+                           (variant.get('product_class') or {}).get('name', '') or
+                           variant.get('original_name', '') or
+                           variant.get('origin_option_name', ''))
+
+            # stocks 배열에서 매장별 재고 추출
+            stocks = variant.get('stocks') or []
+            if stocks:
+                for s in stocks:
+                    store_idx = (s.get('store_idx') or
+                                (s.get('warehouse') or {}).get('store_idx'))
+                    store_name = idx_to_store.get(store_idx, '')
+                    if not store_name:
+                        store_name = norm((s.get('store_name') or
+                                          (s.get('warehouse') or {}).get('store', {}).get('name', '') or ''))
+                    qty = int(s.get('stock', 0) or s.get('qty', 0) or 0)
+                    all_stock.append({
+                        'store': store_name,
+                        'barcode': barcode,
+                        'name': product_name,
+                        'stock': qty
+                    })
+            else:
+                total = int(variant.get('total_stock', 0) or 0)
+                all_stock.append({
+                    'store': 'ALL',
+                    'barcode': barcode,
+                    'name': product_name,
+                    'stock': total
+                })
+
         print(f'  재고 page {page}/{last_page} ({len(all_stock)}건)')
-        
         if page >= last_page:
             break
         page += 1
-    
+
     print(f'✅ 재고 총 {len(all_stock)}건 조회 완료')
-    # 구조 확인용 샘플 출력
     if all_stock:
-        import json
-        print(f'📋 재고 샘플: {json.dumps(all_stock[0], ensure_ascii=False, default=str)[:500]}')
+        print(f'  샘플: {all_stock[0]}')
     return all_stock
 
 # ── 5. 매출 조회 (최근 14일) ──────────────────────────
