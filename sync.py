@@ -130,6 +130,10 @@ def get_all_stock(headers):
         page += 1
     
     print(f'✅ 재고 총 {len(all_stock)}건 조회 완료')
+    # 구조 확인용 샘플 출력
+    if all_stock:
+        import json
+        print(f'📋 재고 샘플: {json.dumps(all_stock[0], ensure_ascii=False, default=str)[:500]}')
     return all_stock
 
 # ── 5. 매출 조회 (최근 14일) ──────────────────────────
@@ -225,16 +229,22 @@ def save_to_sheets(stock_data, sales_data):
     
     stock_rows = []
     for item in stock_data:
-        # 매장별 재고 파싱
         store_name = norm(item.get('store_name', ''))
-        barcode = str(item.get('variant', {}).get('barcode', {}).get('code1', ''))
-        product_name = item.get('variant', {}).get('product', {}).get('name', '')
+        variant = item.get('variant') or {}
+        barcode_obj = variant.get('barcode') or {}
+        barcode = str(barcode_obj.get('code1', '') or '')
+        product = variant.get('product') or {}
+        product_name = product.get('name', '')
         stock_qty = int(item.get('stock', 0) or 0)
-        
-        if not barcode:
+
+        if not barcode or barcode == 'None':
             continue
-        
+
         stock_rows.append([today, store_name, barcode, product_name, stock_qty])
+
+    print(f'  📦 저장할 재고 행수: {len(stock_rows)}')
+    if stock_rows:
+        print(f'  📋 재고 샘플행: {stock_rows[0]}')
     
     # 전체 덮어쓰기 (values= 키워드 인자로 수정)
     ws.clear()
