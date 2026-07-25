@@ -132,16 +132,16 @@ def get_all_stock(headers):
     print(f'✅ 재고 총 {len(all_stock)}건 조회 완료')
     return all_stock
 
-# ── 5. 매출 조회 (오늘 + 최근 14일) ──────────────────
+# ── 5. 매출 조회 (최근 14일) ──────────────────────────
 def get_sales(headers, store_list):
     print('💰 매출 데이터 조회 중...')
     today = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
-    
     all_sales = []
-    
+
     for store_name, store_idx in store_list.items():
         page = 1
+        store_sales_count = 0
         while True:
             res = requests.get(
                 f'{BASE_URL}/order',
@@ -150,41 +150,53 @@ def get_sales(headers, store_list):
                     'perPage': 100,
                     'startDate': start,
                     'endDate': today,
+                    'storeIdx': store_idx,   # 매장 idx 파라미터로 전달
                 },
-                headers={**headers, 'origin_useridx': str(store_idx)}
+                headers=headers
             )
             if res.status_code != 200:
-                print(f'  ⚠️ {store_name} 매출 조회 실패')
+                print(f'  ⚠️ {store_name} 매출 조회 실패: {res.status_code}')
                 break
-            
+
             data = res.json()
-            orders = data.get('data', [])
+            # 응답이 리스트 또는 딕셔너리 처리
+            if isinstance(data, list):
+                orders = data
+                last_page = 1
+            else:
+                orders = data.get('data', [])
+                last_page = data.get('meta', {}).get('last_page', 1)
+
             if not orders:
                 break
-            
+
             for order in orders:
                 if order.get('status') != 'normal':
                     continue
                 order_date = order.get('transaction', {}).get('datetime', '')[:10]
-                for unit in order.get('ordered_unit', []):
-                    barcode = unit.get('sales_unit', {}).get('barcode', {}).get('code1', '')
+                for unit in (order.get('ordered_unit') or []):
+                    if not unit:
+                        continue
+                    su = unit.get('sales_unit') or {}
+                    barcode = (su.get('barcode') or {}).get('code1', '')
                     qty = unit.get('qty', 0)
-                    if barcode and qty:
+                    name = (su.get('product_class') or {}).get('name', '')
+                    if barcode and qty and int(qty) > 0:
                         all_sales.append({
                             'date': order_date,
                             'store': store_name,
-                            'barcode': barcode,
-                            'name': unit.get('sales_unit', {}).get('product_class', {}).get('name', ''),
-                            'qty': qty
+                            'barcode': str(barcode),
+                            'name': name,
+                            'qty': int(qty)
                         })
-            
-            meta = data.get('meta', {})
-            if page >= meta.get('last_page', 1):
+                        store_sales_count += 1
+
+            if page >= last_page:
                 break
             page += 1
-        
-        print(f'  {store_name} 매출 조회 완료')
-    
+
+        print(f'  {store_name} 매출 {store_sales_count}건 조회 완료')
+
     print(f'✅ 매출 총 {len(all_sales)}건 조회 완료')
     return all_sales
 
@@ -224,10 +236,10 @@ def save_to_sheets(stock_data, sales_data):
         
         stock_rows.append([today, store_name, barcode, product_name, stock_qty])
     
-    # 전체 덮어쓰기
+    # 전체 덮어쓰기 (values= 키워드 인자로 수정)
     ws.clear()
     all_rows = [['날짜', '매장', '바코드', '상품명', '현재고']] + rows_to_keep[1:] + stock_rows
-    ws.update('A1', all_rows)
+    ws.update(values=all_rows, range_name='A1')
     print(f'  ✅ 재고 {len(stock_rows)}건 저장')
     
     # ── 매출 시트 저장 ──────────────────────────────
@@ -245,7 +257,7 @@ def save_to_sheets(stock_data, sales_data):
     
     ws2.clear()
     all_rows2 = [['날짜', '매장', '바코드', '상품명', '판매수량']] + rows_to_keep2[1:] + sales_rows
-    ws2.update('A1', all_rows2)
+    ws2.update(values=all_rows2, range_name='A1')
     print(f'  ✅ 매출 {len(sales_rows)}건 저장')
 
 # ── 메인 실행 ─────────────────────────────────────────
