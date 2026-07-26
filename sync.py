@@ -134,8 +134,8 @@ def get_all_stock(headers, store_list):
 
             product_name = ((variant.get('product') or {}).get('name', '') or
                            (variant.get('product_class') or {}).get('name', '') or
-                           variant.get('original_name', '') or
-                           variant.get('origin_option_name', ''))
+                           variant.get('original_name', '') or '')
+            option_name = variant.get('origin_option_name', '') or variant.get('option_name', '') or ''
 
             # stocks 배열에서 매장별 재고 추출
             stocks = variant.get('stocks') or []
@@ -152,6 +152,7 @@ def get_all_stock(headers, store_list):
                         'store': store_name,
                         'barcode': barcode,
                         'name': product_name,
+                        'option': option_name,
                         'stock': qty
                     })
             else:
@@ -160,6 +161,7 @@ def get_all_stock(headers, store_list):
                     'store': 'ALL',
                     'barcode': barcode,
                     'name': product_name,
+                    'option': option_name,
                     'stock': total
                 })
 
@@ -257,33 +259,31 @@ def save_to_sheets(stock_data, sales_data):
     try:
         ws = sh.worksheet('재고데이터')
     except:
-        ws = sh.add_worksheet('재고데이터', 1000, 5)
-        ws.append_row(['날짜', '매장', '바코드', '상품명', '현재고'])
-    
-    # 기존 오늘 날짜 데이터 삭제 후 새로 저장
+        ws = sh.add_worksheet('재고데이터', 10000, 6)
+        ws.append_row(['날짜', '매장', '바코드', '상품명', '옵션명', '현재고'])
+
     existing = ws.get_all_values()
     rows_to_keep = [r for r in existing if r and r[0] != today]
-    
+
     stock_rows = []
     for item in stock_data:
-        # get_all_stock에서 이미 파싱된 구조: {store, barcode, name, stock}
         store_name = item.get('store', '')
         barcode = str(item.get('barcode', '') or '').strip()
         product_name = item.get('name', '')
+        option_name = item.get('option', '')
         stock_qty = int(item.get('stock', 0) or 0)
 
         if not barcode or barcode == 'None' or not store_name or store_name == 'ALL':
             continue
 
-        stock_rows.append([today, store_name, barcode, product_name, stock_qty])
+        stock_rows.append([today, store_name, barcode, product_name, option_name, stock_qty])
 
     print(f'  📦 저장할 재고 행수: {len(stock_rows)}')
     if stock_rows:
         print(f'  📋 재고 샘플행: {stock_rows[0]}')
-    
-    # 전체 덮어쓰기 (values= 키워드 인자로 수정)
+
     ws.clear()
-    all_rows = [['날짜', '매장', '바코드', '상품명', '현재고']] + rows_to_keep[1:] + stock_rows
+    all_rows = [['날짜', '매장', '바코드', '상품명', '옵션명', '현재고']] + rows_to_keep[1:] + stock_rows
     ws.update(values=all_rows, range_name='A1')
     print(f'  ✅ 재고 {len(stock_rows)}건 저장')
     
