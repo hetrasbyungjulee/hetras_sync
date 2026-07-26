@@ -266,15 +266,13 @@ def save_to_sheets(stock_data, sales_data):
     
     stock_rows = []
     for item in stock_data:
-        store_name = norm(item.get('store_name', ''))
-        variant = item.get('variant') or {}
-        barcode_obj = variant.get('barcode') or {}
-        barcode = str(barcode_obj.get('code1', '') or '')
-        product = variant.get('product') or {}
-        product_name = product.get('name', '')
+        # get_all_stock에서 이미 파싱된 구조: {store, barcode, name, stock}
+        store_name = item.get('store', '')
+        barcode = str(item.get('barcode', '') or '').strip()
+        product_name = item.get('name', '')
         stock_qty = int(item.get('stock', 0) or 0)
 
-        if not barcode or barcode == 'None':
+        if not barcode or barcode == 'None' or not store_name or store_name == 'ALL':
             continue
 
         stock_rows.append([today, store_name, barcode, product_name, stock_qty])
@@ -315,7 +313,7 @@ if __name__ == '__main__':
         token, cookies = login()
         headers = get_headers(token, cookies)
         store_list = get_store_list(headers)
-        stock_data = get_all_stock(headers)
+        stock_data = get_all_stock(headers, store_list)
         sales_data = get_sales(headers, store_list)
         save_to_sheets(stock_data, sales_data)
         print('🎉 동기화 완료!')
