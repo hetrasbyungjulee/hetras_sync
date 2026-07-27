@@ -180,67 +180,83 @@ def get_sales(headers, store_list):
     print('💰 매출 데이터 조회 중...')
     today = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
+
+    # filters[] 배열 방식으로 날짜 필터 구성
+    start_dt = f'{start} 00:00:00'
+    end_dt   = f'{today} 23:59:59'
+
     all_sales = []
+    page = 1
 
-    for store_name, store_idx in store_list.items():
-        page = 1
-        store_sales_count = 0
-        while True:
-            res = requests.get(
-                f'{BASE_URL}/order',
-                params={
-                    'page': page,
-                    'perPage': 100,
-                    'startDate': start,
-                    'endDate': today,
-                    'storeIdx': store_idx,   # 매장 idx 파라미터로 전달
-                },
-                headers=headers
-            )
-            if res.status_code != 200:
-                print(f'  ⚠️ {store_name} 매출 조회 실패: {res.status_code}')
-                break
+    while True:
+        res = requests.get(
+            f'{BASE_URL}/order',
+            params=[
+                ('page', page),
+                ('perPage', 100),
+                ('filters[0][field]',    'datetime'),
+                ('filters[0][operator]', '>='),
+                ('filters[0][value]',    start_dt),
+                ('filters[1][field]',    'datetime'),
+                ('filters[1][operator]', '<='),
+                ('filters[1][value]',    end_dt),
+                ('timeflag', 'true'),
+                ('sort[0][field]',     'datetime'),
+                ('sort[0][direction]', 'DESC'),
+            ],
+            headers=headers
+        )
+        if res.status_code != 200:
+            print(f'  ⚠️ 매출 조회 실패 (page {page}): {res.status_code}')
+            break
 
-            data = res.json()
-            # 응답이 리스트 또는 딕셔너리 처리
-            if isinstance(data, list):
-                orders = data
-                last_page = 1
-            else:
-                orders = data.get('data', [])
-                last_page = data.get('meta', {}).get('last_page', 1)
+        data = res.json()
+        if isinstance(data, list):
+            orders = data
+            last_page = 1
+        else:
+            orders = data.get('data', [])
+            last_page = data.get('last_page', 1)
 
-            if not orders:
-                break
+        if not orders:
+            break
 
-            for order in orders:
-                if order.get('status') != 'normal':
+        for order in orders:
+            # 판매 건만 처리 (취소/반품 제외)
+            order_type = order.get('order_type', '')
+            if order_type not in ('판매', 'sale', 'normal', ''):
+                continue
+
+            store_name = norm(order.get('store_name', ''))
+            order_date = str(order.get('datetime', ''))[:10]
+
+            for item in (order.get('items') or []):
+                barcode = str(item.get('barcode', '') or '').strip()
+                if not barcode or barcode == 'None':
                     continue
-                order_date = order.get('transaction', {}).get('datetime', '')[:10]
-                for unit in (order.get('ordered_unit') or []):
-                    if not unit:
-                        continue
-                    su = unit.get('sales_unit') or {}
-                    barcode = (su.get('barcode') or {}).get('code1', '')
-                    qty = unit.get('qty', 0)
-                    name = (su.get('product_class') or {}).get('name', '')
-                    if barcode and qty and int(qty) > 0:
-                        all_sales.append({
-                            'date': order_date,
-                            'store': store_name,
-                            'barcode': str(barcode),
-                            'name': name,
-                            'qty': int(qty)
-                        })
-                        store_sales_count += 1
+                qty = int(item.get('qty', 0) or 0)
+                if qty <= 0:
+                    continue
+                product_name = item.get('product_name', '') or ''
+                option_name  = item.get('option_name', '') or ''
 
-            if page >= last_page:
-                break
-            page += 1
+                all_sales.append({
+                    'date':   order_date,
+                    'store':  store_name,
+                    'barcode': barcode,
+                    'name':   product_name,
+                    'option': option_name,
+                    'qty':    qty
+                })
 
-        print(f'  {store_name} 매출 {store_sales_count}건 조회 완료')
+        print(f'  매출 page {page}/{last_page} (누적 {len(all_sales)}건)')
+        if page >= last_page:
+            break
+        page += 1
 
     print(f'✅ 매출 총 {len(all_sales)}건 조회 완료')
+    if all_sales:
+        print(f'  샘플: {all_sales[0]}')
     return all_sales
 
 # ── 6. 구글 시트 저장 ─────────────────────────────────
