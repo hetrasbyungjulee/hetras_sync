@@ -23,53 +23,52 @@ def norm(s):
 # ── 1. 셀메이트 로그인 ────────────────────────────────
 def login():
     print('🔐 셀메이트 로그인 중...')
-    res = requests.post(
+    session = requests.Session()
+    session.headers.update({
+        'Content-Type': 'application/json',
+        'x-pos-domain': SELLMATE_DOMAIN,
+        'x-api-version': '2.2',
+        'sellmate-pos-js-version': '2.8.2',
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://sellmatepos.com/',
+        'Origin': 'https://sellmatepos.com',
+    })
+
+    res = session.post(
         f'{BASE_URL}/auth/login',
         json={
             'domain': SELLMATE_DOMAIN,
             'id': SELLMATE_ID,
             'pw': SELLMATE_PW,
             'isSellmateAdmin': 0
-        },
-        headers={
-            'Content-Type': 'application/json',
-            'x-pos-domain': SELLMATE_DOMAIN,
-            'x-api-version': '2.2',
-            'sellmate-pos-js-version': '2.8.2',
-            'User-Agent': 'Mozilla/5.0'
         }
     )
     if res.status_code != 200:
         raise Exception(f'로그인 실패: {res.status_code} {res.text[:200]}')
-    
+
     # 토큰 추출 (쿠키에서)
-    token_info = res.cookies.get('tokenInfo')
+    token_info = session.cookies.get('tokenInfo')
     if token_info:
         import urllib.parse
         token_data = json.loads(urllib.parse.unquote(token_info))
         token = token_data.get('access_token')
     else:
-        # 응답 body에서 시도
         data = res.json()
         token = data.get('access_token') or data.get('token')
-    
+
     if not token:
         raise Exception('토큰 추출 실패')
-    
-    print(f'✅ 로그인 성공')
-    return token, res.cookies
 
-# ── 2. 공통 헤더 ──────────────────────────────────────
-def get_headers(token, cookies):
-    return {
-        'Authorization': f'Bearer {token}',
-        'x-pos-domain': SELLMATE_DOMAIN,
-        'x-api-version': '2.2',
-        'sellmate-pos-js-version': '2.8.2',
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        'Cookie': '; '.join([f'{k}={v}' for k, v in cookies.items()])
-    }
+    # 세션에 Authorization 헤더 추가
+    session.headers.update({'Authorization': f'Bearer {token}'})
+
+    print(f'✅ 로그인 성공 (쿠키 {len(session.cookies)}개)')
+    return session
+
+# ── 2. 공통 헤더 (세션 방식으로 불필요하지만 하위 호환용) ─
+def get_headers(session, cookies=None):
+    return session.headers
 
 # ── 3. 매장 목록 조회 ─────────────────────────────────
 def get_store_list(headers):
