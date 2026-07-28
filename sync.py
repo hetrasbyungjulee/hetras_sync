@@ -323,13 +323,12 @@ def save_to_sheets(stock_data, sales_data):
 # ── 메인 실행 ─────────────────────────────────────────
 if __name__ == '__main__':
     print(f'🚀 동기화 시작: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-    
+
     try:
-        token, cookies = login()
-        headers = get_headers(token, cookies)
-        store_list = get_store_list(headers)
-        stock_data = get_all_stock(headers, store_list)
-        sales_data = get_sales(headers, store_list)
+        session = login()
+        store_list = get_store_list(session)
+        stock_data = get_all_stock(session, store_list)
+        sales_data = get_sales(session, store_list)
         save_to_sheets(stock_data, sales_data)
         print('🎉 동기화 완료!')
     except Exception as e:
