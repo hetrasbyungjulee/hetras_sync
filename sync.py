@@ -71,8 +71,8 @@ def get_headers(session, cookies=None):
     return session.headers
 
 # ── 3. 매장 목록 조회 ─────────────────────────────────
-def get_store_list(headers):
-    res = requests.get(f'{BASE_URL}/store?mode=list', headers=headers)
+def get_store_list(session):
+    res = session.get(f'{BASE_URL}/store?mode=list')
     if res.status_code != 200:
         print(f'⚠️ 매장 목록 조회 실패: {res.status_code}')
         return {}
@@ -94,7 +94,7 @@ def get_store_list(headers):
     return stores
 
 # ── 4. 재고 전체 조회 ─────────────────────────────────
-def get_all_stock(headers, store_list):
+def get_all_stock(session, store_list):
     print('📦 재고 데이터 조회 중...')
     idx_to_store = {v: k for k, v in store_list.items()}
     all_stock = []
@@ -102,10 +102,9 @@ def get_all_stock(headers, store_list):
     per_page = 100
 
     while True:
-        res = requests.get(
+        res = session.get(
             f'{BASE_URL}/product/variant/stock',
-            params={'page': page, 'perPage': per_page},
-            headers=headers
+            params={'page': page, 'perPage': per_page}
         )
         if res.status_code != 200:
             print(f'⚠️ 재고 조회 실패 (page {page}): {res.status_code}')
