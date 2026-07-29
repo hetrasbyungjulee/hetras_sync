@@ -259,7 +259,4 @@ if __name__ == '__main__':
     except Exception as e:
         print(f'❌ 오류 발생: {e}')
         raise
-PYEOF
-echo "완료: $(wc -l < /mnt/user-data/outputs/github_actions/sync.py)줄"
-
 
