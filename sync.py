@@ -592,36 +592,24 @@ def get_all_stock(
 
     return all_stock
 
-
 # =====================================================
 # 4. 매출 조회
 # =====================================================
 
-def get_sales(
-    session,
-    store_list
-):
+def get_sales(session, store_list):
 
     print("💰 매출 데이터 조회 중...")
 
-    today = datetime.now().strftime(
-        "%Y-%m-%d"
-    )
+    today = datetime.now().strftime("%Y-%m-%d")
 
     start = (
-        datetime.now()
-        - timedelta(days=14)
-    ).strftime(
-        "%Y-%m-%d"
-    )
+        datetime.now() - timedelta(days=14)
+    ).strftime("%Y-%m-%d")
 
-    start_dt = (
-        f"{start} 00:00:00"
-    )
+    start_dt = f"{start} 00:00:00"
+    end_dt = f"{today} 23:59:59"
 
-    end_dt = (
-        f"{today} 23:59:59"
-    )
+    print(f"  📅 조회기간: {start_dt} ~ {end_dt}")
 
     all_sales = []
 
@@ -629,55 +617,29 @@ def get_sales(
 
     while True:
 
-        params = [
-            ("page", page),
-            ("perPage", 100),
+        # -------------------------------------------------
+        # 셀메이트 매출 API
+        # -------------------------------------------------
 
-            (
-                "filters[0][field]",
-                "datetime"
-            ),
+        params = {
+            "page": page,
+            "perPage": 100,
 
-            (
-                "filters[0][operator]",
-                ">="
-            ),
+            "filters[0][field]": "datetime",
+            "filters[0][operator]": ">=",
+            "filters[0][value]": start_dt,
 
-            (
-                "filters[0][value]",
-                start_dt
-            ),
+            "filters[1][field]": "datetime",
+            "filters[1][operator]": "<=",
+            "filters[1][value]": end_dt,
 
-            (
-                "filters[1][field]",
-                "datetime"
-            ),
+            "timeflag": "true",
 
-            (
-                "filters[1][operator]",
-                "<="
-            ),
+            "sort[0][field]": "datetime",
+            "sort[0][direction]": "DESC",
+        }
 
-            (
-                "filters[1][value]",
-                end_dt
-            ),
-
-            (
-                "timeflag",
-                "true"
-            ),
-
-            (
-                "sort[0][field]",
-                "datetime"
-            ),
-
-            (
-                "sort[0][direction]",
-                "DESC"
-            ),
-        ]
+        print(f"  🔎 매출 API 요청 page={page}")
 
         try:
 
@@ -699,17 +661,19 @@ def get_sales(
             f"{res.status_code}"
         )
 
+        # -------------------------------------------------
+        # 오류 확인
+        # -------------------------------------------------
+
         if res.status_code != 200:
 
-            if res.status_code == 412:
+            print(
+                "  ❌ 매출 API 오류 응답:"
+            )
 
-                raise Exception(
-                    "매출 API가 412 "
-                    "'Need JS Update'를 "
-                    "반환했습니다. "
-                    f"현재 JS 버전: "
-                    f"{SELLMATE_JS_VERSION}"
-                )
+            print(
+                f"  {res.text[:2000]}"
+            )
 
             raise Exception(
                 f"매출 API 조회 실패 "
@@ -717,6 +681,10 @@ def get_sales(
                 f"{res.status_code} "
                 f"{res.text[:500]}"
             )
+
+        # -------------------------------------------------
+        # JSON
+        # -------------------------------------------------
 
         try:
 
@@ -730,30 +698,30 @@ def get_sales(
                 f"{res.text[:1000]}"
             )
 
-        if isinstance(
-            data,
-            list
-        ):
+        # -------------------------------------------------
+        # 데이터 구조
+        # -------------------------------------------------
+
+        if isinstance(data, list):
 
             orders = data
             last_page = 1
 
-        elif isinstance(
-            data,
-            dict
-        ):
+        elif isinstance(data, dict):
 
             orders = data.get(
                 "data",
                 []
             )
 
+            meta = data.get(
+                "meta",
+                {}
+            )
+
             last_page = data.get(
                 "last_page",
-                data.get(
-                    "meta",
-                    {}
-                ).get(
+                meta.get(
                     "last_page",
                     1
                 )
@@ -766,7 +734,16 @@ def get_sales(
 
         if not orders:
 
+            print(
+                f"  ℹ️ page {page}: "
+                "매출 데이터 없음"
+            )
+
             break
+
+        # -------------------------------------------------
+        # 주문 → 상품별 매출 변환
+        # -------------------------------------------------
 
         for order in orders:
 
@@ -776,16 +753,19 @@ def get_sales(
             ):
                 continue
 
-            order_type = order.get(
-                "order_type",
-                ""
-            )
+            order_type = str(
+                order.get(
+                    "order_type",
+                    ""
+                )
+            ).strip()
 
+            # 판매 주문만
             if order_type not in (
+                "",
                 "판매",
                 "sale",
                 "normal",
-                "",
             ):
                 continue
 
@@ -876,11 +856,10 @@ def get_sales(
         print(
             f"  매출 page "
             f"{page}/{last_page} "
-            f"(누적 "
-            f"{len(all_sales)}건)"
+            f"(누적 {len(all_sales)}건)"
         )
 
-        if page >= last_page:
+        if page >= int(last_page):
             break
 
         page += 1
@@ -891,6 +870,7 @@ def get_sales(
     )
 
     if all_sales:
+
         print(
             f"  샘플: "
             f"{all_sales[0]}"
