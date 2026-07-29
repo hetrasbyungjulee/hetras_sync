@@ -598,285 +598,132 @@ def get_all_stock(
 
 def get_sales(session, store_list):
 
-    print("💰 매출 데이터 조회 중...")
+    print("💰 매출 API 테스트 조회 중...")
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    # -------------------------------------------------
+    # 1단계: 필터 없이 주문 API 호출
+    # -------------------------------------------------
 
-    start = (
-        datetime.now() - timedelta(days=14)
-    ).strftime("%Y-%m-%d")
+    params = {
+        "page": 1,
+        "perPage": 10,
+    }
 
-    start_dt = f"{start} 00:00:00"
-    end_dt = f"{today} 23:59:59"
+    print("  🔎 1단계: 기본 주문 API 테스트")
+    print(f"  📌 요청 파라미터: {params}")
 
-    print(f"  📅 조회기간: {start_dt} ~ {end_dt}")
+    try:
 
-    all_sales = []
+        res = session.get(
+            f"{BASE_URL}/order",
+            params=params,
+            timeout=30,
+        )
 
-    page = 1
+    except requests.RequestException as e:
 
-    while True:
+        raise Exception(
+            f"매출 API 요청 실패: {e}"
+        )
 
-        # -------------------------------------------------
-        # 셀메이트 매출 API
-        # -------------------------------------------------
+    print(
+        f"  📡 응답 상태: {res.status_code}"
+    )
 
-        params = {
-            "page": page,
-            "perPage": 100,
+    print(
+        f"  📡 실제 요청 URL: {res.url}"
+    )
 
-            "filters[0][field]": "datetime",
-            "filters[0][operator]": ">=",
-            "filters[0][value]": start_dt,
+    print(
+        f"  📡 응답 내용: {res.text[:3000]}"
+    )
 
-            "filters[1][field]": "datetime",
-            "filters[1][operator]": "<=",
-            "filters[1][value]": end_dt,
+    if res.status_code != 200:
 
-            "timeflag": "true",
-
-            "sort[0][field]": "datetime",
-            "sort[0][direction]": "DESC",
-        }
-
-        print(f"  🔎 매출 API 요청 page={page}")
-
-        try:
-
-            res = session.get(
-                f"{BASE_URL}/order",
-                params=params,
-                timeout=30,
-            )
-
-        except requests.RequestException as e:
-
-            raise Exception(
-                f"매출 API 요청 실패 "
-                f"(page {page}): {e}"
-            )
-
-        print(
-            f"  매출 API 응답: "
+        raise Exception(
+            f"기본 주문 API 호출 실패: "
             f"{res.status_code}"
         )
 
-        # -------------------------------------------------
-        # 오류 확인
-        # -------------------------------------------------
+    # -------------------------------------------------
+    # JSON 확인
+    # -------------------------------------------------
 
-        if res.status_code != 200:
+    try:
 
-            print(
-                "  ❌ 매출 API 오류 응답:"
-            )
+        data = res.json()
 
-            print(
-                f"  {res.text[:2000]}"
-            )
+    except Exception:
 
-            raise Exception(
-                f"매출 API 조회 실패 "
-                f"(page {page}): "
-                f"{res.status_code} "
-                f"{res.text[:500]}"
-            )
-
-        # -------------------------------------------------
-        # JSON
-        # -------------------------------------------------
-
-        try:
-
-            data = res.json()
-
-        except Exception:
-
-            raise Exception(
-                "매출 API 응답이 "
-                "JSON이 아닙니다: "
-                f"{res.text[:1000]}"
-            )
-
-        # -------------------------------------------------
-        # 데이터 구조
-        # -------------------------------------------------
-
-        if isinstance(data, list):
-
-            orders = data
-            last_page = 1
-
-        elif isinstance(data, dict):
-
-            orders = data.get(
-                "data",
-                []
-            )
-
-            meta = data.get(
-                "meta",
-                {}
-            )
-
-            last_page = data.get(
-                "last_page",
-                meta.get(
-                    "last_page",
-                    1
-                )
-            )
-
-        else:
-
-            orders = []
-            last_page = 1
-
-        if not orders:
-
-            print(
-                f"  ℹ️ page {page}: "
-                "매출 데이터 없음"
-            )
-
-            break
-
-        # -------------------------------------------------
-        # 주문 → 상품별 매출 변환
-        # -------------------------------------------------
-
-        for order in orders:
-
-            if not isinstance(
-                order,
-                dict
-            ):
-                continue
-
-            order_type = str(
-                order.get(
-                    "order_type",
-                    ""
-                )
-            ).strip()
-
-            # 판매 주문만
-            if order_type not in (
-                "",
-                "판매",
-                "sale",
-                "normal",
-            ):
-                continue
-
-            store_name = norm(
-                order.get(
-                    "store_name",
-                    ""
-                )
-            )
-
-            order_date = str(
-                order.get(
-                    "datetime",
-                    ""
-                )
-            )[:10]
-
-            items = (
-                order.get(
-                    "items"
-                )
-                or []
-            )
-
-            for item in items:
-
-                if not isinstance(
-                    item,
-                    dict
-                ):
-                    continue
-
-                barcode = str(
-                    item.get(
-                        "barcode",
-                        ""
-                    )
-                    or ""
-                ).strip()
-
-                if (
-                    not barcode
-                    or barcode == "None"
-                ):
-                    continue
-
-                try:
-
-                    qty = int(
-                        item.get(
-                            "qty",
-                            0
-                        )
-                        or 0
-                    )
-
-                except (
-                    ValueError,
-                    TypeError
-                ):
-
-                    qty = 0
-
-                if qty <= 0:
-                    continue
-
-                all_sales.append({
-                    "date": order_date,
-                    "store": store_name,
-                    "barcode": barcode,
-                    "name": (
-                        item.get(
-                            "product_name",
-                            ""
-                        )
-                        or ""
-                    ),
-                    "option": (
-                        item.get(
-                            "option_name",
-                            ""
-                        )
-                        or ""
-                    ),
-                    "qty": qty,
-                })
-
-        print(
-            f"  매출 page "
-            f"{page}/{last_page} "
-            f"(누적 {len(all_sales)}건)"
+        raise Exception(
+            "주문 API 응답이 JSON이 아닙니다."
         )
 
-        if page >= int(last_page):
-            break
+    print("  ✅ 주문 API 기본 호출 성공")
 
-        page += 1
+    # -------------------------------------------------
+    # 데이터 구조 확인
+    # -------------------------------------------------
+
+    if isinstance(data, list):
+
+        orders = data
+
+    elif isinstance(data, dict):
+
+        orders = data.get(
+            "data",
+            []
+        )
+
+    else:
+
+        orders = []
 
     print(
-        f"✅ 매출 총 "
-        f"{len(all_sales)}건"
+        f"  📦 주문 데이터: "
+        f"{len(orders)}건"
     )
 
-    if all_sales:
+    # -------------------------------------------------
+    # 샘플 구조 출력
+    # -------------------------------------------------
+
+    if orders:
 
         print(
-            f"  샘플: "
-            f"{all_sales[0]}"
+            "  🔍 첫 번째 주문 데이터 구조:"
         )
 
-    return all_sales
+        print(
+            json.dumps(
+                orders[0],
+                ensure_ascii=False,
+                indent=2
+            )[:5000]
+        )
+
+    # -------------------------------------------------
+    # 여기까지 성공하면 우선 종료
+    # -------------------------------------------------
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "🧪 매출 API 기본 호출 테스트 성공"
+    )
+
+    print(
+        "🧪 위에 출력된 주문 데이터 구조를 확인해주세요."
+    )
+
+    print(
+        "========================================"
+    )
+
+    return []
 
 # =====================================================
 # 5-1. 재고 Google Sheets 저장
