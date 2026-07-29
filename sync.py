@@ -119,8 +119,150 @@ def get_store_list(session):
         print(f'⚠️ 매장 목록 조회 실패: {res.status_code}')
         print(res.text[:1000])
         return {}
+def get_all_stock(session, store_list):
+    print('📦 재고 데이터 조회 중...')
 
+    idx_to_store = {v: k for k, v in store_list.items()}
+    all_stock = []
+    page = 1
+
+    while True:
+        res = session.get(
+            f'{POS_BASE_URL}/product/variant/stock',
+            params={
+                'page': page,
+                'perPage': 15
+            }
+        )
+
+        print(
+            f'  재고 API 응답: {res.status_code} '
+            f'({res.headers.get("Content-Type", "")})'
+        )
+
+        if res.status_code != 200:
+            print(f'⚠️ 재고 조회 실패 (page {page}): {res.status_code}')
+            print(f'응답 내용: {res.text[:1000]}')
+            break
+
+        try:
+            data = res.json()
+        except Exception:
+            print('❌ 재고 API 응답이 JSON이 아닙니다.')
+            print(res.text[:1000])
+            break
+
+        if isinstance(data, list):
+            items = data
+            last_page = 1
+        elif isinstance(data, dict):
+            items = data.get('data', [])
+            meta = data.get('meta', {})
+            last_page = meta.get('last_page', 1)
+        else:
+            items = []
+            last_page = 1
+
+        if not items:
+            print(f'  재고 데이터 없음 (page {page})')
+            break
+
+        for item in items:
+
+            barcode = str(
+                (item.get('barcode') or {}).get('code1', '')
+                or item.get('code1', '')
+                or ''
+            ).strip()
+
+            if not barcode or barcode == 'None':
+                continue
+
+            product_name = (
+                (item.get('product') or {}).get('name', '')
+                or (item.get('product_class') or {}).get('name', '')
+                or item.get('original_name', '')
+                or ''
+            )
+
+            option_name = (
+                item.get('origin_option_name', '')
+                or item.get('option_name', '')
+                or ''
+            )
+
+            stocks = item.get('stocks') or []
+
+            if stocks:
+
+                for s in stocks:
+
+                    store_idx = (
+                        s.get('store_idx')
+                        or (s.get('warehouse') or {}).get('store_idx')
+                    )
+
+                    store_name = idx_to_store.get(
+                        store_idx,
+                        ''
+                    )
+
+                    if not store_name:
+                        store_name = norm(
+                            s.get('store_name', '')
+                            or (s.get('warehouse') or {})
+                                .get('store', {})
+                                .get('name', '')
+                            or ''
+                        )
+
+                    qty = int(
+                        s.get('stock', 0)
+                        or s.get('qty', 0)
+                        or 0
+                    )
+
+                    all_stock.append({
+                        'store': store_name,
+                        'barcode': barcode,
+                        'name': product_name,
+                        'option': option_name,
+                        'stock': qty
+                    })
+
+            else:
+
+                total = int(
+                    item.get('total_stock', 0)
+                    or 0
+                )
+
+                all_stock.append({
+                    'store': 'ALL',
+                    'barcode': barcode,
+                    'name': product_name,
+                    'option': option_name,
+                    'stock': total
+                })
+
+        print(
+            f'  재고 page {page}/{last_page} '
+            f'({len(all_stock)}건)'
+        )
+
+        if page >= last_page:
+            break
+
+        page += 1
+
+    print(f'✅ 재고 총 {len(all_stock)}건')
+
+    if all_stock:
+        print(f'  샘플: {all_stock[0]}')
+
+    return all_stock
     try:
+        
         raw = res.json()
     except Exception:
         print('❌ 매장 API가 JSON이 아닌 응답을 반환했습니다.')
