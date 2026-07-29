@@ -9,7 +9,7 @@ import urllib.parse
 import requests
 import gspread
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.oauth2.service_account import Credentials
 
 
