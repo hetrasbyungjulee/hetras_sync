@@ -86,7 +86,9 @@ def get_all_stock(session, store_list):
                           params={'page': page, 'perPage': 100})
         if res.status_code != 200:
             print(f'⚠️ 재고 조회 실패 (page {page}): {res.status_code}')
-            break
+            print(f'  응답 헤더: {dict(res.headers)}')
+            print(f'  응답 내용: {res.text[:2000]}')
+        break
 
         data = res.json()
         items = data if isinstance(data, list) else data.get('data', [])
@@ -155,7 +157,9 @@ def get_sales(session, store_list):
         ])
         if res.status_code != 200:
             print(f'  ⚠️ 매출 조회 실패 (page {page}): {res.status_code}')
-            break
+            print(f'  응답 헤더: {dict(res.headers)}')
+            print(f'  응답 내용: {res.text[:2000]}')
+        break
 
         data = res.json()
         orders = data if isinstance(data, list) else data.get('data', [])
