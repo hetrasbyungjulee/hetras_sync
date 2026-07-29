@@ -175,11 +175,11 @@ def get_all_stock(session, store_list):
 
 # ── 5. 매출 조회 (최근 14일) ──────────────────────────
 def get_sales(headers, store_list):
+# ── 5. 매출 조회 (최근 14일) ──────────────────────────
+def get_sales(session, store_list):
     print('💰 매출 데이터 조회 중...')
     today = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
-
-    # filters[] 배열 방식으로 날짜 필터 구성
     start_dt = f'{start} 00:00:00'
     end_dt   = f'{today} 23:59:59'
 
@@ -187,7 +187,7 @@ def get_sales(headers, store_list):
     page = 1
 
     while True:
-        res = requests.get(
+        res = session.get(
             f'{BASE_URL}/order',
             params=[
                 ('page', page),
@@ -201,8 +201,7 @@ def get_sales(headers, store_list):
                 ('timeflag', 'true'),
                 ('sort[0][field]',     'datetime'),
                 ('sort[0][direction]', 'DESC'),
-            ],
-            headers=headers
+            ]
         )
         if res.status_code != 200:
             print(f'  ⚠️ 매출 조회 실패 (page {page}): {res.status_code}')
@@ -220,14 +219,11 @@ def get_sales(headers, store_list):
             break
 
         for order in orders:
-            # 판매 건만 처리 (취소/반품 제외)
             order_type = order.get('order_type', '')
             if order_type not in ('판매', 'sale', 'normal', ''):
                 continue
-
             store_name = norm(order.get('store_name', ''))
             order_date = str(order.get('datetime', ''))[:10]
-
             for item in (order.get('items') or []):
                 barcode = str(item.get('barcode', '') or '').strip()
                 if not barcode or barcode == 'None':
@@ -235,16 +231,13 @@ def get_sales(headers, store_list):
                 qty = int(item.get('qty', 0) or 0)
                 if qty <= 0:
                     continue
-                product_name = item.get('product_name', '') or ''
-                option_name  = item.get('option_name', '') or ''
-
                 all_sales.append({
-                    'date':   order_date,
-                    'store':  store_name,
+                    'date':    order_date,
+                    'store':   store_name,
                     'barcode': barcode,
-                    'name':   product_name,
-                    'option': option_name,
-                    'qty':    qty
+                    'name':    item.get('product_name', '') or '',
+                    'option':  item.get('option_name', '') or '',
+                    'qty':     qty
                 })
 
         print(f'  매출 page {page}/{last_page} (누적 {len(all_sales)}건)')
