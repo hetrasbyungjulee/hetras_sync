@@ -23,6 +23,9 @@ SELLMATE_DOMAIN = os.environ.get("SELLMATE_DOMAIN", "hetras")
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_CREDS = json.loads(os.environ["GOOGLE_CREDENTIALS"])
 
+# 셀메이트 현재 JS 버전
+SELLMATE_JS_VERSION = "2.8.4"
+
 
 # =====================================================
 # API
@@ -53,7 +56,7 @@ def login():
         "Accept": "application/json",
         "x-pos-domain": SELLMATE_DOMAIN,
         "x-api-version": "2.2",
-        "sellmate-pos-js-version": "2.8.2",
+        "sellmate-pos-js-version": SELLMATE_JS_VERSION,
         "pos-locale": "kr",
         "Referer": "https://sellmatepos.com/",
         "Origin": "https://sellmatepos.com",
@@ -76,11 +79,15 @@ def login():
             timeout=30,
         )
     except requests.RequestException as e:
-        raise Exception(f"셀메이트 로그인 요청 실패: {e}")
+        raise Exception(
+            f"셀메이트 로그인 요청 실패: {e}"
+        )
 
     if res.status_code != 200:
         raise Exception(
-            f"로그인 실패: {res.status_code} {res.text[:500]}"
+            f"로그인 실패: "
+            f"{res.status_code} "
+            f"{res.text[:500]}"
         )
 
     token = None
@@ -92,34 +99,50 @@ def login():
             token_data = json.loads(
                 urllib.parse.unquote(token_info)
             )
-            token = token_data.get("access_token")
+
+            token = token_data.get(
+                "access_token"
+            )
+
         except Exception as e:
-            print(f"⚠️ tokenInfo 파싱 실패: {e}")
+            print(
+                f"⚠️ tokenInfo 파싱 실패: {e}"
+            )
 
     if not token:
         try:
             data = res.json()
+
             token = (
                 data.get("access_token")
                 or data.get("token")
             )
+
         except Exception:
             pass
 
     if not token:
-        raise Exception("토큰 추출 실패")
+        raise Exception(
+            "토큰 추출 실패"
+        )
 
     session.headers.update({
         "Authorization": f"Bearer {token}",
         "origin_useridx": "9",
         "pos-locale": "kr",
-        "sellmate-pos-js-version": "2.8.2",
+        "sellmate-pos-js-version": SELLMATE_JS_VERSION,
         "x-api-version": "2.2",
         "x-pos-domain": SELLMATE_DOMAIN,
     })
 
     print(
-        f"✅ 로그인 성공 (쿠키 {len(session.cookies)}개)"
+        f"✅ 로그인 성공 "
+        f"(쿠키 {len(session.cookies)}개)"
+    )
+
+    print(
+        f"  셀메이트 JS 버전: "
+        f"{SELLMATE_JS_VERSION}"
     )
 
     return session
@@ -137,12 +160,15 @@ def get_store_list(session):
             f"{BASE_URL}/store?mode=list",
             timeout=30,
         )
+
     except requests.RequestException as e:
-        print(f"❌ 매장 API 요청 실패: {e}")
-        return {}
+        raise Exception(
+            f"매장 API 요청 실패: {e}"
+        )
 
     print(
-        f"  매장 API 응답: {res.status_code}"
+        f"  매장 API 응답: "
+        f"{res.status_code}"
     )
 
     print(
@@ -151,41 +177,61 @@ def get_store_list(session):
     )
 
     if res.status_code != 200:
-        print(
-            f"⚠️ 매장 목록 조회 실패: "
-            f"{res.status_code}"
+        raise Exception(
+            f"매장 목록 조회 실패: "
+            f"{res.status_code} "
+            f"{res.text[:500]}"
         )
-        print(res.text[:1000])
-        return {}
 
     try:
         raw = res.json()
+
     except Exception:
-        print("❌ 매장 API 응답이 JSON이 아닙니다.")
-        print(res.text[:1000])
-        return {}
+        raise Exception(
+            "매장 API 응답이 JSON이 아닙니다: "
+            f"{res.text[:1000]}"
+        )
 
     if isinstance(raw, list):
         items = raw
+
     elif isinstance(raw, dict):
-        items = raw.get("data", [])
+        items = raw.get(
+            "data",
+            []
+        )
+
     else:
         items = []
 
     stores = {}
 
     for store in items:
-        if not isinstance(store, dict):
+
+        if not isinstance(
+            store,
+            dict
+        ):
             continue
 
         name = norm(
-            store.get("name", "")
+            store.get(
+                "name",
+                ""
+            )
         )
 
-        idx = store.get("idx")
+        idx = store.get(
+            "idx"
+        )
 
         if name and idx is not None:
             stores[name] = idx
+
+    if not stores:
+        raise Exception(
+            "매장 목록이 비어 있습니다."
+        )
 
     print(
         f"📍 매장 {len(stores)}개: "
@@ -199,12 +245,20 @@ def get_store_list(session):
 # 3. 재고 조회
 # =====================================================
 
-def get_all_stock(session, store_list):
+def get_all_stock(
+    session,
+    store_list
+):
+
     print("📦 재고 데이터 조회 중...")
 
-    if not isinstance(store_list, dict):
+    if not isinstance(
+        store_list,
+        dict
+    ):
         raise Exception(
-            f"매장 목록 데이터가 올바르지 않습니다: "
+            f"매장 목록 데이터가 "
+            f"올바르지 않습니다: "
             f"{store_list}"
         )
 
@@ -214,11 +268,13 @@ def get_all_stock(session, store_list):
     }
 
     all_stock = []
+
     page = 1
 
     while True:
 
         try:
+
             res = session.get(
                 f"{BASE_URL}/product/variant/stock",
                 params={
@@ -227,12 +283,13 @@ def get_all_stock(session, store_list):
                 },
                 timeout=30,
             )
+
         except requests.RequestException as e:
-            print(
-                f"❌ 재고 API 요청 실패 "
+
+            raise Exception(
+                f"재고 API 요청 실패 "
                 f"(page {page}): {e}"
             )
-            break
 
         print(
             f"  재고 API 응답: "
@@ -240,33 +297,58 @@ def get_all_stock(session, store_list):
         )
 
         if res.status_code != 200:
-            print(
-                f"⚠️ 재고 조회 실패 "
+
+            if res.status_code == 412:
+
+                raise Exception(
+                    "재고 API가 412 "
+                    "'Need JS Update'를 "
+                    "반환했습니다. "
+                    f"현재 JS 버전: "
+                    f"{SELLMATE_JS_VERSION}"
+                )
+
+            raise Exception(
+                f"재고 API 조회 실패 "
                 f"(page {page}): "
-                f"{res.status_code}"
+                f"{res.status_code} "
+                f"{res.text[:500]}"
             )
-            print(res.text[:1000])
-            break
 
         try:
-            data = res.json()
-        except Exception:
-            print(
-                "❌ 재고 API 응답이 JSON이 아닙니다."
-            )
-            print(res.text[:1000])
-            break
 
-        if isinstance(data, list):
+            data = res.json()
+
+        except Exception:
+
+            raise Exception(
+                "재고 API 응답이 "
+                "JSON이 아닙니다: "
+                f"{res.text[:1000]}"
+            )
+
+        if isinstance(
+            data,
+            list
+        ):
 
             items = data
             last_page = 1
 
-        elif isinstance(data, dict):
+        elif isinstance(
+            data,
+            dict
+        ):
 
-            items = data.get("data", [])
+            items = data.get(
+                "data",
+                []
+            )
 
-            meta = data.get("meta", {})
+            meta = data.get(
+                "meta",
+                {}
+            )
 
             last_page = meta.get(
                 "last_page",
@@ -280,20 +362,27 @@ def get_all_stock(session, store_list):
 
         if not items:
 
-            print(
-                f"  재고 데이터 없음 "
-                f"(page {page})"
-            )
+            if page == 1:
+
+                raise Exception(
+                    "재고 API 응답 데이터가 "
+                    "비어 있습니다."
+                )
 
             break
 
         for item in items:
 
-            if not isinstance(item, dict):
+            if not isinstance(
+                item,
+                dict
+            ):
                 continue
 
             barcode_data = (
-                item.get("barcode")
+                item.get(
+                    "barcode"
+                )
                 or {}
             )
 
@@ -309,23 +398,39 @@ def get_all_stock(session, store_list):
                 or ""
             ).strip()
 
-            if not barcode or barcode == "None":
+            if (
+                not barcode
+                or barcode == "None"
+            ):
                 continue
 
             product = (
-                item.get("product")
+                item.get(
+                    "product"
+                )
                 or {}
             )
 
             product_class = (
-                item.get("product_class")
+                item.get(
+                    "product_class"
+                )
                 or {}
             )
 
             product_name = (
-                product.get("name", "")
-                or product_class.get("name", "")
-                or item.get("original_name", "")
+                product.get(
+                    "name",
+                    ""
+                )
+                or product_class.get(
+                    "name",
+                    ""
+                )
+                or item.get(
+                    "original_name",
+                    ""
+                )
                 or ""
             )
 
@@ -342,7 +447,9 @@ def get_all_stock(session, store_list):
             )
 
             stocks = (
-                item.get("stocks")
+                item.get(
+                    "stocks"
+                )
                 or []
             )
 
@@ -350,17 +457,26 @@ def get_all_stock(session, store_list):
 
                 for stock in stocks:
 
-                    if not isinstance(stock, dict):
+                    if not isinstance(
+                        stock,
+                        dict
+                    ):
                         continue
 
                     warehouse = (
-                        stock.get("warehouse")
+                        stock.get(
+                            "warehouse"
+                        )
                         or {}
                     )
 
                     store_idx = (
-                        stock.get("store_idx")
-                        or warehouse.get("store_idx")
+                        stock.get(
+                            "store_idx"
+                        )
+                        or warehouse.get(
+                            "store_idx"
+                        )
                     )
 
                     store_name = (
@@ -373,7 +489,9 @@ def get_all_stock(session, store_list):
                     if not store_name:
 
                         warehouse_store = (
-                            warehouse.get("store")
+                            warehouse.get(
+                                "store"
+                            )
                             or {}
                         )
 
@@ -456,14 +574,21 @@ def get_all_stock(session, store_list):
 
         page += 1
 
+    if not all_stock:
+
+        raise Exception(
+            "재고 데이터를 가져오지 못했습니다."
+        )
+
     print(
-        f"✅ 재고 총 {len(all_stock)}건"
+        f"✅ 재고 총 "
+        f"{len(all_stock)}건"
     )
 
-    if all_stock:
-        print(
-            f"  샘플: {all_stock[0]}"
-        )
+    print(
+        f"  샘플: "
+        f"{all_stock[0]}"
+    )
 
     return all_stock
 
@@ -472,7 +597,11 @@ def get_all_stock(session, store_list):
 # 4. 매출 조회
 # =====================================================
 
-def get_sales(session, store_list):
+def get_sales(
+    session,
+    store_list
+):
+
     print("💰 매출 데이터 조회 중...")
 
     today = datetime.now().strftime(
@@ -486,10 +615,16 @@ def get_sales(session, store_list):
         "%Y-%m-%d"
     )
 
-    start_dt = f"{start} 00:00:00"
-    end_dt = f"{today} 23:59:59"
+    start_dt = (
+        f"{start} 00:00:00"
+    )
+
+    end_dt = (
+        f"{today} 23:59:59"
+    )
 
     all_sales = []
+
     page = 1
 
     while True:
@@ -554,26 +689,34 @@ def get_sales(session, store_list):
 
         except requests.RequestException as e:
 
-            print(
-                f"❌ 매출 API 요청 실패 "
+            raise Exception(
+                f"매출 API 요청 실패 "
                 f"(page {page}): {e}"
             )
 
-            break
+        print(
+            f"  매출 API 응답: "
+            f"{res.status_code}"
+        )
 
         if res.status_code != 200:
 
-            print(
-                f"⚠️ 매출 조회 실패 "
+            if res.status_code == 412:
+
+                raise Exception(
+                    "매출 API가 412 "
+                    "'Need JS Update'를 "
+                    "반환했습니다. "
+                    f"현재 JS 버전: "
+                    f"{SELLMATE_JS_VERSION}"
+                )
+
+            raise Exception(
+                f"매출 API 조회 실패 "
                 f"(page {page}): "
-                f"{res.status_code}"
+                f"{res.status_code} "
+                f"{res.text[:500]}"
             )
-
-            print(
-                res.text[:1000]
-            )
-
-            break
 
         try:
 
@@ -581,22 +724,24 @@ def get_sales(session, store_list):
 
         except Exception:
 
-            print(
-                "❌ 매출 API 응답이 JSON이 아닙니다."
+            raise Exception(
+                "매출 API 응답이 "
+                "JSON이 아닙니다: "
+                f"{res.text[:1000]}"
             )
 
-            print(
-                res.text[:1000]
-            )
-
-            break
-
-        if isinstance(data, list):
+        if isinstance(
+            data,
+            list
+        ):
 
             orders = data
             last_page = 1
 
-        elif isinstance(data, dict):
+        elif isinstance(
+            data,
+            dict
+        ):
 
             orders = data.get(
                 "data",
@@ -620,6 +765,7 @@ def get_sales(session, store_list):
             last_page = 1
 
         if not orders:
+
             break
 
         for order in orders:
@@ -658,7 +804,9 @@ def get_sales(session, store_list):
             )[:10]
 
             items = (
-                order.get("items")
+                order.get(
+                    "items"
+                )
                 or []
             )
 
@@ -728,7 +876,8 @@ def get_sales(session, store_list):
         print(
             f"  매출 page "
             f"{page}/{last_page} "
-            f"(누적 {len(all_sales)}건)"
+            f"(누적 "
+            f"{len(all_sales)}건)"
         )
 
         if page >= last_page:
@@ -737,12 +886,14 @@ def get_sales(session, store_list):
         page += 1
 
     print(
-        f"✅ 매출 총 {len(all_sales)}건"
+        f"✅ 매출 총 "
+        f"{len(all_sales)}건"
     )
 
     if all_sales:
         print(
-            f"  샘플: {all_sales[0]}"
+            f"  샘플: "
+            f"{all_sales[0]}"
         )
 
     return all_sales
@@ -760,6 +911,14 @@ def save_to_sheets(
     print(
         "📊 구글 시트에 저장 중..."
     )
+
+    # 데이터가 정상적으로 들어왔는지 최종 확인
+    if not stock_data:
+
+        raise Exception(
+            "재고 데이터가 0건이라 "
+            "Google Sheets를 변경하지 않습니다."
+        )
 
     creds = Credentials.from_service_account_info(
         GOOGLE_CREDS,
@@ -872,16 +1031,31 @@ def save_to_sheets(
             today,
             store_name,
             barcode,
-            item.get("name", ""),
-            item.get("option", ""),
+            item.get(
+                "name",
+                ""
+            ),
+            item.get(
+                "option",
+                ""
+            ),
             stock_qty,
         ])
+
+    if not stock_rows:
+
+        raise Exception(
+            "실제 저장 가능한 재고가 "
+            "0건이라 Google Sheets를 "
+            "변경하지 않습니다."
+        )
 
     print(
         f"  📦 저장할 재고: "
         f"{len(stock_rows)}건"
     )
 
+    # 정상 데이터가 확보된 후에만 시트 변경
     ws.clear()
 
     all_rows = [
@@ -896,7 +1070,8 @@ def save_to_sheets(
     )
 
     print(
-        f"  ✅ 재고 {len(stock_rows)}건 저장"
+        f"  ✅ 재고 "
+        f"{len(stock_rows)}건 저장"
     )
 
 
@@ -1000,7 +1175,8 @@ def save_to_sheets(
     )
 
     print(
-        f"  ✅ 매출 {len(sales_rows)}건 저장"
+        f"  ✅ 매출 "
+        f"{len(sales_rows)}건 저장"
     )
 
 
@@ -1019,7 +1195,13 @@ def main():
     )
 
     print(
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🕐 "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    print(
+        f"🔧 셀메이트 JS 버전: "
+        f"{SELLMATE_JS_VERSION}"
     )
 
     print(
@@ -1033,12 +1215,6 @@ def main():
         store_list = get_store_list(
             session
         )
-
-        if not store_list:
-
-            raise Exception(
-                "매장 목록을 가져오지 못했습니다."
-            )
 
         stock_data = get_all_stock(
             session,
@@ -1074,7 +1250,7 @@ def main():
         )
 
         print(
-            f"❌ 오류 발생: {e}"
+            f"❌ 동기화 실패: {e}"
         )
 
         print(
