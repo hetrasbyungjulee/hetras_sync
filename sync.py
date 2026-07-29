@@ -1,26 +1,24 @@
+bash
+
+cat > /mnt/user-data/outputs/github_actions/sync.py << 'PYEOF'
 # =====================================================
-# 헤트라스 셀메이트 자동 동기화 스크립트
-# GitHub Actions에서 매시간 자동 실행
+# 헤트라스 셀메이트 자동 동기화 스크립트 (완전체)
 # =====================================================
 import os, requests, gspread, json
 from datetime import datetime, timedelta
 from google.oauth2.service_account import Credentials
 
-# ── 설정 ─────────────────────────────────────────────
 SELLMATE_ID     = os.environ['SELLMATE_ID']
 SELLMATE_PW     = os.environ['SELLMATE_PW']
 SELLMATE_DOMAIN = os.environ.get('SELLMATE_DOMAIN', 'hetras')
 SPREADSHEET_ID  = os.environ['SPREADSHEET_ID']
 GOOGLE_CREDS    = json.loads(os.environ['GOOGLE_CREDENTIALS'])
+BASE_URL        = 'https://sellmatepos.com/json'
 
-STORES = ['안국', '명동', '성수', '제주', '한남', '홍대', '해운대']
-BASE_URL = 'https://sellmatepos.com/json'
-
-# ── 매장명 정규화 ─────────────────────────────────────
 def norm(s):
     return str(s).strip().rstrip('점').rstrip('店')
 
-# ── 1. 셀메이트 로그인 ────────────────────────────────
+# ── 1. 로그인 (Session 방식) ──────────────────────────
 def login():
     print('🔐 셀메이트 로그인 중...')
     session = requests.Session()
@@ -30,24 +28,19 @@ def login():
         'x-api-version': '2.2',
         'sellmate-pos-js-version': '2.8.2',
         'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://sellmatepos.com/',
         'Origin': 'https://sellmatepos.com',
     })
-
-    res = session.post(
-        f'{BASE_URL}/auth/login',
-        json={
-            'domain': SELLMATE_DOMAIN,
-            'id': SELLMATE_ID,
-            'pw': SELLMATE_PW,
-            'isSellmateAdmin': 0
-        }
-    )
+    res = session.post(f'{BASE_URL}/auth/login', json={
+        'domain': SELLMATE_DOMAIN,
+        'id': SELLMATE_ID,
+        'pw': SELLMATE_PW,
+        'isSellmateAdmin': 0
+    })
     if res.status_code != 200:
         raise Exception(f'로그인 실패: {res.status_code} {res.text[:200]}')
 
-    # 토큰 추출 (쿠키에서)
     token_info = session.cookies.get('tokenInfo')
     if token_info:
         import urllib.parse
@@ -60,122 +53,91 @@ def login():
     if not token:
         raise Exception('토큰 추출 실패')
 
-    # 세션에 Authorization 헤더 추가
     session.headers.update({'Authorization': f'Bearer {token}'})
-
     print(f'✅ 로그인 성공 (쿠키 {len(session.cookies)}개)')
     return session
 
-# ── 2. 공통 헤더 (세션 방식으로 불필요하지만 하위 호환용) ─
-def get_headers(session, cookies=None):
-    return session.headers
-
-# ── 3. 매장 목록 조회 ─────────────────────────────────
+# ── 2. 매장 목록 ──────────────────────────────────────
 def get_store_list(session):
     res = session.get(f'{BASE_URL}/store?mode=list')
     if res.status_code != 200:
         print(f'⚠️ 매장 목록 조회 실패: {res.status_code}')
         return {}
-    
     raw = res.json()
-    # 응답이 리스트일 수도, {"data": [...]} 형태일 수도 있음
     if isinstance(raw, list):
-        store_items = raw
+        items = raw
     elif isinstance(raw, dict):
-        store_items = raw.get('data', [])
+        items = raw.get('data', [])
     else:
-        store_items = []
-    
+        items = []
     stores = {}
-    for s in store_items:
+    for s in items:
         if isinstance(s, dict):
-            stores[norm(s.get('name',''))] = s.get('idx')
-    print(f'📍 매장 {len(stores)}개 조회됨: {list(stores.keys())}')
+            stores[norm(s.get('name', ''))] = s.get('idx')
+    print(f'📍 매장 {len(stores)}개: {list(stores.keys())}')
     return stores
 
-# ── 4. 재고 전체 조회 ─────────────────────────────────
+# ── 3. 재고 조회 ──────────────────────────────────────
 def get_all_stock(session, store_list):
     print('📦 재고 데이터 조회 중...')
     idx_to_store = {v: k for k, v in store_list.items()}
     all_stock = []
     page = 1
-    per_page = 100
 
     while True:
-        res = session.get(
-            f'{BASE_URL}/product/variant/stock',
-            params={'page': page, 'perPage': per_page}
-        )
+        res = session.get(f'{BASE_URL}/product/variant/stock',
+                          params={'page': page, 'perPage': 100})
         if res.status_code != 200:
             print(f'⚠️ 재고 조회 실패 (page {page}): {res.status_code}')
             break
 
         data = res.json()
-        if isinstance(data, list):
-            items = data
-            last_page = 1
-        else:
-            items = data.get('data', [])
-            last_page = data.get('meta', {}).get('last_page', 1)
+        items = data if isinstance(data, list) else data.get('data', [])
+        last_page = 1 if isinstance(data, list) else data.get('meta', {}).get('last_page', 1)
 
         if not items:
             break
 
         for item in items:
-            variant = item or {}
-            # 바코드 추출
-            barcode = str((variant.get('barcode') or {}).get('code1', '') or '').strip()
+            barcode = str((item.get('barcode') or {}).get('code1', '') or '').strip()
             if not barcode or barcode == 'None':
-                barcode = str(variant.get('code1', '') or '').strip()
+                barcode = str(item.get('code1', '') or '').strip()
             if not barcode:
                 continue
 
-            product_name = ((variant.get('product') or {}).get('name', '') or
-                           (variant.get('product_class') or {}).get('name', '') or
-                           variant.get('original_name', '') or '')
-            option_name = variant.get('origin_option_name', '') or variant.get('option_name', '') or ''
+            product_name = ((item.get('product') or {}).get('name', '') or
+                            (item.get('product_class') or {}).get('name', '') or
+                            item.get('original_name', '') or '')
+            option_name = item.get('origin_option_name', '') or item.get('option_name', '') or ''
 
-            # stocks 배열에서 매장별 재고 추출
-            stocks = variant.get('stocks') or []
+            stocks = item.get('stocks') or []
             if stocks:
                 for s in stocks:
                     store_idx = (s.get('store_idx') or
-                                (s.get('warehouse') or {}).get('store_idx'))
+                                 (s.get('warehouse') or {}).get('store_idx'))
                     store_name = idx_to_store.get(store_idx, '')
                     if not store_name:
                         store_name = norm((s.get('store_name') or
-                                          (s.get('warehouse') or {}).get('store', {}).get('name', '') or ''))
+                                           (s.get('warehouse') or {}).get('store', {}).get('name', '') or ''))
                     qty = int(s.get('stock', 0) or s.get('qty', 0) or 0)
-                    all_stock.append({
-                        'store': store_name,
-                        'barcode': barcode,
-                        'name': product_name,
-                        'option': option_name,
-                        'stock': qty
-                    })
+                    all_stock.append({'store': store_name, 'barcode': barcode,
+                                      'name': product_name, 'option': option_name, 'stock': qty})
             else:
-                total = int(variant.get('total_stock', 0) or 0)
-                all_stock.append({
-                    'store': 'ALL',
-                    'barcode': barcode,
-                    'name': product_name,
-                    'option': option_name,
-                    'stock': total
-                })
+                total = int(item.get('total_stock', 0) or 0)
+                all_stock.append({'store': 'ALL', 'barcode': barcode,
+                                  'name': product_name, 'option': option_name, 'stock': total})
 
         print(f'  재고 page {page}/{last_page} ({len(all_stock)}건)')
         if page >= last_page:
             break
         page += 1
 
-    print(f'✅ 재고 총 {len(all_stock)}건 조회 완료')
+    print(f'✅ 재고 총 {len(all_stock)}건')
     if all_stock:
         print(f'  샘플: {all_stock[0]}')
     return all_stock
 
-# ── 5. 매출 조회 (최근 14일) ──────────────────────────
-def get_sales(headers, store_list):
-# ── 5. 매출 조회 (최근 14일) ──────────────────────────
+# ── 4. 매출 조회 ──────────────────────────────────────
 def get_sales(session, store_list):
     print('💰 매출 데이터 조회 중...')
     today = datetime.now().strftime('%Y-%m-%d')
@@ -187,40 +149,26 @@ def get_sales(session, store_list):
     page = 1
 
     while True:
-        res = session.get(
-            f'{BASE_URL}/order',
-            params=[
-                ('page', page),
-                ('perPage', 100),
-                ('filters[0][field]',    'datetime'),
-                ('filters[0][operator]', '>='),
-                ('filters[0][value]',    start_dt),
-                ('filters[1][field]',    'datetime'),
-                ('filters[1][operator]', '<='),
-                ('filters[1][value]',    end_dt),
-                ('timeflag', 'true'),
-                ('sort[0][field]',     'datetime'),
-                ('sort[0][direction]', 'DESC'),
-            ]
-        )
+        res = session.get(f'{BASE_URL}/order', params=[
+            ('page', page), ('perPage', 100),
+            ('filters[0][field]', 'datetime'), ('filters[0][operator]', '>='), ('filters[0][value]', start_dt),
+            ('filters[1][field]', 'datetime'), ('filters[1][operator]', '<='), ('filters[1][value]', end_dt),
+            ('timeflag', 'true'),
+            ('sort[0][field]', 'datetime'), ('sort[0][direction]', 'DESC'),
+        ])
         if res.status_code != 200:
             print(f'  ⚠️ 매출 조회 실패 (page {page}): {res.status_code}')
             break
 
         data = res.json()
-        if isinstance(data, list):
-            orders = data
-            last_page = 1
-        else:
-            orders = data.get('data', [])
-            last_page = data.get('last_page', 1)
+        orders = data if isinstance(data, list) else data.get('data', [])
+        last_page = 1 if isinstance(data, list) else data.get('last_page', 1)
 
         if not orders:
             break
 
         for order in orders:
-            order_type = order.get('order_type', '')
-            if order_type not in ('판매', 'sale', 'normal', ''):
+            if order.get('order_type', '') not in ('판매', 'sale', 'normal', ''):
                 continue
             store_name = norm(order.get('store_name', ''))
             order_date = str(order.get('datetime', ''))[:10]
@@ -232,12 +180,9 @@ def get_sales(session, store_list):
                 if qty <= 0:
                     continue
                 all_sales.append({
-                    'date':    order_date,
-                    'store':   store_name,
-                    'barcode': barcode,
-                    'name':    item.get('product_name', '') or '',
-                    'option':  item.get('option_name', '') or '',
-                    'qty':     qty
+                    'date': order_date, 'store': store_name, 'barcode': barcode,
+                    'name': item.get('product_name', '') or '',
+                    'option': item.get('option_name', '') or '', 'qty': qty
                 })
 
         print(f'  매출 page {page}/{last_page} (누적 {len(all_sales)}건)')
@@ -245,29 +190,25 @@ def get_sales(session, store_list):
             break
         page += 1
 
-    print(f'✅ 매출 총 {len(all_sales)}건 조회 완료')
+    print(f'✅ 매출 총 {len(all_sales)}건')
     if all_sales:
         print(f'  샘플: {all_sales[0]}')
     return all_sales
 
-# ── 6. 구글 시트 저장 ─────────────────────────────────
+# ── 5. 구글 시트 저장 ─────────────────────────────────
 def save_to_sheets(stock_data, sales_data):
     print('📊 구글 시트에 저장 중...')
-    
     creds = Credentials.from_service_account_info(
-        GOOGLE_CREDS,
-        scopes=['https://www.googleapis.com/auth/spreadsheets']
-    )
+        GOOGLE_CREDS, scopes=['https://www.googleapis.com/auth/spreadsheets'])
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
     today = datetime.now().strftime('%Y-%m-%d')
-    
-    # ── 재고 시트 저장 ──────────────────────────────
+
+    # ── 재고 저장 ────────────────────────────────────
     try:
         ws = sh.worksheet('재고데이터')
     except:
         ws = sh.add_worksheet('재고데이터', 10000, 6)
-        ws.append_row(['날짜', '매장', '바코드', '상품명', '옵션명', '현재고'])
 
     existing = ws.get_all_values()
     rows_to_keep = [r for r in existing if r and r[0] != today]
@@ -276,48 +217,43 @@ def save_to_sheets(stock_data, sales_data):
     for item in stock_data:
         store_name = item.get('store', '')
         barcode = str(item.get('barcode', '') or '').strip()
-        product_name = item.get('name', '')
-        option_name = item.get('option', '')
-        stock_qty = int(item.get('stock', 0) or 0)
-
         if not barcode or barcode == 'None' or not store_name or store_name == 'ALL':
             continue
+        stock_rows.append([today, store_name, barcode,
+                           item.get('name', ''), item.get('option', ''),
+                           int(item.get('stock', 0) or 0)])
 
-        stock_rows.append([today, store_name, barcode, product_name, option_name, stock_qty])
-
-    print(f'  📦 저장할 재고 행수: {len(stock_rows)}')
+    print(f'  📦 저장할 재고: {len(stock_rows)}건')
     if stock_rows:
-        print(f'  📋 재고 샘플행: {stock_rows[0]}')
+        print(f'  샘플: {stock_rows[0]}')
 
     ws.clear()
     all_rows = [['날짜', '매장', '바코드', '상품명', '옵션명', '현재고']] + rows_to_keep[1:] + stock_rows
     ws.update(values=all_rows, range_name='A1')
     print(f'  ✅ 재고 {len(stock_rows)}건 저장')
-    
-    # ── 매출 시트 저장 ──────────────────────────────
+
+    # ── 매출 저장 ────────────────────────────────────
     try:
         ws2 = sh.worksheet('매출데이터')
     except:
-        ws2 = sh.add_worksheet('매출데이터', 1000, 5)
-        ws2.append_row(['날짜', '매장', '바코드', '상품명', '판매수량'])
-    
+        ws2 = sh.add_worksheet('매출데이터', 100000, 6)
+
     existing2 = ws2.get_all_values()
-    # 오늘 날짜 데이터만 교체
     rows_to_keep2 = [r for r in existing2 if r and r[0] != today]
-    
-    sales_rows = [[s['date'], s['store'], s['barcode'], s['name'], s['qty']] for s in sales_data if s['date'] == today]
-    
+
+    sales_rows = [[s['date'], s['store'], s['barcode'],
+                   s['name'], s['option'], s['qty']] for s in sales_data if s['date'] == today]
+
     ws2.clear()
-    all_rows2 = [['날짜', '매장', '바코드', '상품명', '판매수량']] + rows_to_keep2[1:] + sales_rows
+    all_rows2 = [['날짜', '매장', '바코드', '상품명', '옵션명', '판매수량']] + rows_to_keep2[1:] + sales_rows
     ws2.update(values=all_rows2, range_name='A1')
     print(f'  ✅ 매출 {len(sales_rows)}건 저장')
 
-# ── 메인 실행 ─────────────────────────────────────────
+# ── 메인 ──────────────────────────────────────────────
 if __name__ == '__main__':
     print(f'🚀 동기화 시작: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-
     try:
-        session = login()
+        session    = login()
         store_list = get_store_list(session)
         stock_data = get_all_stock(session, store_list)
         sales_data = get_sales(session, store_list)
@@ -326,3 +262,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(f'❌ 오류 발생: {e}')
         raise
+PYEOF
+echo "완료: $(wc -l < /mnt/user-data/outputs/github_actions/sync.py)줄"
+
+
