@@ -10,7 +10,7 @@ SELLMATE_PW     = os.environ['SELLMATE_PW']
 SELLMATE_DOMAIN = os.environ.get('SELLMATE_DOMAIN', 'hetras')
 SPREADSHEET_ID  = os.environ['SPREADSHEET_ID']
 GOOGLE_CREDS    = json.loads(os.environ['GOOGLE_CREDENTIALS'])
-BASE_URL        = 'https://sellmatepos.com/json'
+BASE_URL        = 'https://sellmatepos.com'
 
 def norm(s):
     return str(s).strip().rstrip('점').rstrip('店')
@@ -18,42 +18,71 @@ def norm(s):
 # ── 1. 로그인 (Session 방식) ──────────────────────────
 def login():
     print('🔐 셀메이트 로그인 중...')
+
     session = requests.Session()
+
     session.headers.update({
         'Content-Type': 'application/json',
+        'Accept': 'application/json',
         'x-pos-domain': SELLMATE_DOMAIN,
         'x-api-version': '2.2',
-        'sellmate-pos-js-version': '2.8.2',
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'sellmate-pos-js-version': '2.8.4',
+        'pos-locale': 'kr',
         'Referer': 'https://sellmatepos.com/',
         'Origin': 'https://sellmatepos.com',
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/151.0.0.0 Safari/537.36'
+        ),
     })
-    res = session.post(f'{BASE_URL}/auth/login', json={
-        'domain': SELLMATE_DOMAIN,
-        'id': SELLMATE_ID,
-        'pw': SELLMATE_PW,
-        'isSellmateAdmin': 0
-    })
+
+    res = session.post(
+        f'{BASE_URL}/json/auth/login',
+        json={
+            'domain': SELLMATE_DOMAIN,
+            'id': SELLMATE_ID,
+            'pw': SELLMATE_PW,
+            'isSellmateAdmin': 0
+        }
+    )
+
     if res.status_code != 200:
-        raise Exception(f'로그인 실패: {res.status_code} {res.text[:200]}')
+        raise Exception(
+            f'로그인 실패: {res.status_code} {res.text[:500]}'
+        )
 
     token_info = session.cookies.get('tokenInfo')
+
     if token_info:
         import urllib.parse
-        token_data = json.loads(urllib.parse.unquote(token_info))
+        token_data = json.loads(
+            urllib.parse.unquote(token_info)
+        )
         token = token_data.get('access_token')
     else:
         data = res.json()
-        token = data.get('access_token') or data.get('token')
+        token = (
+            data.get('access_token')
+            or data.get('token')
+        )
 
     if not token:
         raise Exception('토큰 추출 실패')
 
-    session.headers.update({'Authorization': f'Bearer {token}'})
-    print(f'✅ 로그인 성공 (쿠키 {len(session.cookies)}개)')
-    return session
+    session.headers.update({
+        'Authorization': f'Bearer {token}',
+        'origin_useridx': '9',
+        'pos-locale': 'kr',
+        'sellmate-pos-js-version': '2.8.4',
+        'x-api-version': '2.2',
+        'x-pos-domain': SELLMATE_DOMAIN,
+    })
 
+    print(f'✅ 로그인 성공 (쿠키 {len(session.cookies)}개)')
+
+    return session
+    
 # ── 2. 매장 목록 ──────────────────────────────────────
 def get_store_list(session):
     res = session.get(f'{BASE_URL}/store?mode=list')
