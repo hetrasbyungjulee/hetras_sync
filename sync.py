@@ -598,132 +598,336 @@ def get_all_stock(
 
 def get_sales(session, store_list):
 
-    print("💰 매출 API 테스트 조회 중...")
+    print("💰 매출 데이터 조회 중...")
 
-    # -------------------------------------------------
-    # 1단계: 필터 없이 주문 API 호출
-    # -------------------------------------------------
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    params = {
-        "page": 1,
-        "perPage": 10,
-    }
+    print(
+        f"  📅 오늘 매출 기준일: {today}"
+    )
 
-    print("  🔎 1단계: 기본 주문 API 테스트")
-    print(f"  📌 요청 파라미터: {params}")
+    all_sales = []
 
-    try:
+    page = 1
 
-        res = session.get(
-            f"{BASE_URL}/order",
-            params=params,
-            timeout=30,
+    while True:
+
+        # -------------------------------------------------
+        # 셀메이트 주문 API
+        #
+        # 날짜 필터를 사용하면 500 오류가 발생하므로
+        # API에서는 날짜 필터를 사용하지 않고
+        # 최신 주문부터 받아 Python에서 날짜를 확인한다.
+        # -------------------------------------------------
+
+        params = [
+            ("page", page),
+            ("perPage", 100),
+
+            ("sort[0][field]", "datetime"),
+            ("sort[0][direction]", "DESC"),
+        ]
+
+        print(
+            f"  🔎 매출 API 요청 page={page}"
         )
 
-    except requests.RequestException as e:
+        try:
 
-        raise Exception(
-            f"매출 API 요청 실패: {e}"
-        )
+            res = session.get(
+                f"{BASE_URL}/order",
+                params=params,
+                timeout=30,
+            )
 
-    print(
-        f"  📡 응답 상태: {res.status_code}"
-    )
+        except requests.RequestException as e:
 
-    print(
-        f"  📡 실제 요청 URL: {res.url}"
-    )
+            raise Exception(
+                f"매출 API 요청 실패 "
+                f"(page {page}): {e}"
+            )
 
-    print(
-        f"  📡 응답 내용: {res.text[:3000]}"
-    )
-
-    if res.status_code != 200:
-
-        raise Exception(
-            f"기본 주문 API 호출 실패: "
+        print(
+            f"  📡 매출 API 응답: "
             f"{res.status_code}"
         )
 
-    # -------------------------------------------------
-    # JSON 확인
-    # -------------------------------------------------
+        if res.status_code != 200:
 
-    try:
+            if res.status_code == 412:
 
-        data = res.json()
+                raise Exception(
+                    "매출 API가 412 "
+                    "'Need JS Update'를 반환했습니다. "
+                    f"현재 JS 버전: "
+                    f"{SELLMATE_JS_VERSION}"
+                )
 
-    except Exception:
+            raise Exception(
+                f"매출 API 조회 실패 "
+                f"(page {page}): "
+                f"{res.status_code} "
+                f"{res.text[:500]}"
+            )
 
-        raise Exception(
-            "주문 API 응답이 JSON이 아닙니다."
+        # -------------------------------------------------
+        # JSON
+        # -------------------------------------------------
+
+        try:
+
+            data = res.json()
+
+        except Exception:
+
+            raise Exception(
+                "매출 API 응답이 JSON이 아닙니다: "
+                f"{res.text[:1000]}"
+            )
+
+        # -------------------------------------------------
+        # 응답 데이터 추출
+        # -------------------------------------------------
+
+        if isinstance(data, list):
+
+            orders = data
+            last_page = 1
+
+        elif isinstance(data, dict):
+
+            orders = data.get(
+                "data",
+                []
+            )
+
+            meta = data.get(
+                "meta",
+                {}
+            )
+
+            last_page = data.get(
+                "last_page",
+                meta.get(
+                    "last_page",
+                    1
+                )
+            )
+
+        else:
+
+            orders = []
+            last_page = 1
+
+        if not orders:
+
+            print(
+                f"  ℹ️ page {page}: 주문 데이터 없음"
+            )
+
+            break
+
+        # -------------------------------------------------
+        # 주문 데이터 처리
+        # -------------------------------------------------
+
+        reached_old_data = False
+
+        for order in orders:
+
+            if not isinstance(
+                order,
+                dict
+            ):
+                continue
+
+            # ---------------------------------------------
+            # 주문 날짜
+            # ---------------------------------------------
+
+            order_datetime = str(
+                order.get(
+                    "datetime",
+                    ""
+                )
+                or ""
+            )
+
+            order_date = order_datetime[:10]
+
+            # ---------------------------------------------
+            # 최신순이므로 오늘보다 과거 데이터가 나오면
+            # 이후 페이지에는 오늘 데이터가 없을 가능성이 높음
+            # ---------------------------------------------
+
+            if order_date < today:
+
+                reached_old_data = True
+                continue
+
+            # 미래 날짜는 제외
+            if order_date > today:
+                continue
+
+            # ---------------------------------------------
+            # 판매 주문만
+            # ---------------------------------------------
+
+            order_type = str(
+                order.get(
+                    "order_type",
+                    ""
+                )
+                or ""
+            ).strip()
+
+            if order_type not in (
+                "",
+                "판매",
+                "sale",
+                "normal",
+            ):
+                continue
+
+            # ---------------------------------------------
+            # 매장
+            # ---------------------------------------------
+
+            store_name = norm(
+                order.get(
+                    "store_name",
+                    ""
+                )
+            )
+
+            if not store_name:
+                continue
+
+            # ---------------------------------------------
+            # 상품
+            # ---------------------------------------------
+
+            items = (
+                order.get(
+                    "items"
+                )
+                or []
+            )
+
+            for item in items:
+
+                if not isinstance(
+                    item,
+                    dict
+                ):
+                    continue
+
+                barcode = str(
+                    item.get(
+                        "barcode",
+                        ""
+                    )
+                    or ""
+                ).strip()
+
+                if (
+                    not barcode
+                    or barcode == "None"
+                ):
+                    continue
+
+                # -----------------------------------------
+                # 판매수량
+                # -----------------------------------------
+
+                try:
+
+                    qty = int(
+                        item.get(
+                            "qty",
+                            0
+                        )
+                        or 0
+                    )
+
+                except (
+                    ValueError,
+                    TypeError
+                ):
+
+                    qty = 0
+
+                if qty <= 0:
+                    continue
+
+                all_sales.append({
+                    "date": order_date,
+                    "store": store_name,
+                    "barcode": barcode,
+                    "name": (
+                        item.get(
+                            "product_name",
+                            ""
+                        )
+                        or ""
+                    ),
+                    "option": (
+                        item.get(
+                            "option_name",
+                            ""
+                        )
+                        or ""
+                    ),
+                    "qty": qty,
+                })
+
+        print(
+            f"  📄 매출 page "
+            f"{page}/{last_page} "
+            f"(오늘 누적 {len(all_sales)}건)"
         )
 
-    print("  ✅ 주문 API 기본 호출 성공")
+        # ---------------------------------------------
+        # 오늘 데이터가 끝났으면 종료
+        # ---------------------------------------------
+
+        if reached_old_data:
+
+            print(
+                "  🛑 오늘 이전 매출 데이터 발견"
+            )
+
+            break
+
+        if page >= int(last_page):
+
+            break
+
+        page += 1
 
     # -------------------------------------------------
-    # 데이터 구조 확인
+    # 결과
     # -------------------------------------------------
 
-    if isinstance(data, list):
+    print(
+        f"✅ 오늘 매출 총 "
+        f"{len(all_sales)}건"
+    )
 
-        orders = data
+    if all_sales:
 
-    elif isinstance(data, dict):
-
-        orders = data.get(
-            "data",
-            []
+        print(
+            f"  🔍 샘플: "
+            f"{all_sales[0]}"
         )
 
     else:
 
-        orders = []
-
-    print(
-        f"  📦 주문 데이터: "
-        f"{len(orders)}건"
-    )
-
-    # -------------------------------------------------
-    # 샘플 구조 출력
-    # -------------------------------------------------
-
-    if orders:
-
         print(
-            "  🔍 첫 번째 주문 데이터 구조:"
+            "  ⚠️ 오늘 매출 데이터가 없습니다."
         )
 
-        print(
-            json.dumps(
-                orders[0],
-                ensure_ascii=False,
-                indent=2
-            )[:5000]
-        )
-
-    # -------------------------------------------------
-    # 여기까지 성공하면 우선 종료
-    # -------------------------------------------------
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "🧪 매출 API 기본 호출 테스트 성공"
-    )
-
-    print(
-        "🧪 위에 출력된 주문 데이터 구조를 확인해주세요."
-    )
-
-    print(
-        "========================================"
-    )
-
-    return []
+    return all_sales
 
 # =====================================================
 # 5-1. 재고 Google Sheets 저장
