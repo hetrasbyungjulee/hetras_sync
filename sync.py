@@ -898,26 +898,17 @@ def get_sales(
 
     return all_sales
 
-
 # =====================================================
-# 5. Google Sheets 저장
+# 5-1. 재고 Google Sheets 저장
 # =====================================================
 
-def save_to_sheets(
-    stock_data,
-    sales_data
-):
+def save_stock_to_sheets(stock_data):
 
-    print(
-        "📊 구글 시트에 저장 중..."
-    )
+    print("📊 재고 데이터를 Google Sheets에 저장 중...")
 
-    # 데이터가 정상적으로 들어왔는지 최종 확인
     if not stock_data:
-
         raise Exception(
-            "재고 데이터가 0건이라 "
-            "Google Sheets를 변경하지 않습니다."
+            "재고 데이터가 0건이라 저장하지 않습니다."
         )
 
     creds = Credentials.from_service_account_info(
@@ -928,28 +919,14 @@ def save_to_sheets(
         ],
     )
 
-    gc = gspread.authorize(
-        creds
-    )
+    gc = gspread.authorize(creds)
 
-    sh = gc.open_by_key(
-        SPREADSHEET_ID
-    )
+    sh = gc.open_by_key(SPREADSHEET_ID)
 
-    today = datetime.now().strftime(
-        "%Y-%m-%d"
-    )
-
-
-    # =================================================
-    # 재고데이터
-    # =================================================
+    today = datetime.now().strftime("%Y-%m-%d")
 
     try:
-
-        ws = sh.worksheet(
-            "재고데이터"
-        )
+        ws = sh.worksheet("재고데이터")
 
     except gspread.WorksheetNotFound:
 
@@ -970,20 +947,15 @@ def save_to_sheets(
         "현재고",
     ]
 
+    # 오늘 데이터만 제거하고 과거 데이터는 유지
     rows_to_keep = []
 
     if existing:
 
         for row in existing[1:]:
 
-            if (
-                row
-                and row[0] != today
-            ):
-
-                rows_to_keep.append(
-                    row
-                )
+            if row and row[0] != today:
+                rows_to_keep.append(row)
 
     stock_rows = []
 
@@ -1031,23 +1003,15 @@ def save_to_sheets(
             today,
             store_name,
             barcode,
-            item.get(
-                "name",
-                ""
-            ),
-            item.get(
-                "option",
-                ""
-            ),
+            item.get("name", ""),
+            item.get("option", ""),
             stock_qty,
         ])
 
     if not stock_rows:
 
         raise Exception(
-            "실제 저장 가능한 재고가 "
-            "0건이라 Google Sheets를 "
-            "변경하지 않습니다."
+            "저장 가능한 재고 데이터가 0건입니다."
         )
 
     print(
@@ -1055,14 +1019,14 @@ def save_to_sheets(
         f"{len(stock_rows)}건"
     )
 
-    # 정상 데이터가 확보된 후에만 시트 변경
-    ws.clear()
-
     all_rows = [
         header,
         *rows_to_keep,
         *stock_rows,
     ]
+
+    # 정상적인 데이터가 준비된 후 시트 갱신
+    ws.clear()
 
     ws.update(
         range_name="A1",
@@ -1070,32 +1034,47 @@ def save_to_sheets(
     )
 
     print(
-        f"  ✅ 재고 "
-        f"{len(stock_rows)}건 저장"
+        f"  ✅ 재고 {len(stock_rows)}건 저장 완료"
     )
 
 
-    # =================================================
-    # 매출데이터
-    # =================================================
+# =====================================================
+# 5-2. 매출 Google Sheets 저장
+# =====================================================
+
+def save_sales_to_sheets(sales_data):
+
+    print("📊 매출 데이터를 Google Sheets에 저장 중...")
+
+    creds = Credentials.from_service_account_info(
+        GOOGLE_CREDS,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+
+    gc = gspread.authorize(creds)
+
+    sh = gc.open_by_key(SPREADSHEET_ID)
+
+    today = datetime.now().strftime("%Y-%m-%d")
 
     try:
 
-        ws2 = sh.worksheet(
-            "매출데이터"
-        )
+        ws = sh.worksheet("매출데이터")
 
     except gspread.WorksheetNotFound:
 
-        ws2 = sh.add_worksheet(
+        ws = sh.add_worksheet(
             title="매출데이터",
             rows=100000,
             cols=6,
         )
 
-    existing2 = ws2.get_all_values()
+    existing = ws.get_all_values()
 
-    header2 = [
+    header = [
         "날짜",
         "매장",
         "바코드",
@@ -1104,81 +1083,56 @@ def save_to_sheets(
         "판매수량",
     ]
 
-    rows_to_keep2 = []
+    rows_to_keep = []
 
-    if existing2:
+    if existing:
 
-        for row in existing2[1:]:
+        for row in existing[1:]:
 
-            if (
-                row
-                and row[0] != today
-            ):
-
-                rows_to_keep2.append(
-                    row
-                )
+            if row and row[0] != today:
+                rows_to_keep.append(row)
 
     sales_rows = []
 
     for sale in sales_data:
 
-        if sale.get(
-            "date"
-        ) != today:
-
+        if sale.get("date") != today:
             continue
 
         sales_rows.append([
-            sale.get(
-                "date",
-                ""
-            ),
-
-            sale.get(
-                "store",
-                ""
-            ),
-
-            sale.get(
-                "barcode",
-                ""
-            ),
-
-            sale.get(
-                "name",
-                ""
-            ),
-
-            sale.get(
-                "option",
-                ""
-            ),
-
-            sale.get(
-                "qty",
-                0
-            ),
+            sale.get("date", ""),
+            sale.get("store", ""),
+            sale.get("barcode", ""),
+            sale.get("name", ""),
+            sale.get("option", ""),
+            sale.get("qty", 0),
         ])
 
-    ws2.clear()
+    # 매출이 0건이면 기존 시트를 건드리지 않음
+    if not sales_rows:
 
-    all_rows2 = [
-        header2,
-        *rows_to_keep2,
+        print(
+            "⚠️ 오늘 매출 데이터가 0건입니다."
+        )
+
+        return
+
+    all_rows = [
+        header,
+        *rows_to_keep,
         *sales_rows,
     ]
 
-    ws2.update(
+    ws.clear()
+
+    ws.update(
         range_name="A1",
-        values=all_rows2,
+        values=all_rows,
     )
 
     print(
-        f"  ✅ 매출 "
-        f"{len(sales_rows)}건 저장"
+        f"  ✅ 매출 {len(sales_rows)}건 저장 완료"
     )
-
 
 # =====================================================
 # 6. 메인
@@ -1210,25 +1164,35 @@ def main():
 
     try:
 
+        # ---------------------------------------------
+        # 로그인
+        # ---------------------------------------------
+
         session = login()
+
+        # ---------------------------------------------
+        # 매장 목록
+        # ---------------------------------------------
 
         store_list = get_store_list(
             session
         )
+
+        # ---------------------------------------------
+        # 재고 조회
+        # ---------------------------------------------
 
         stock_data = get_all_stock(
             session,
             store_list
         )
 
-        sales_data = get_sales(
-            session,
-            store_list
-        )
+        # ---------------------------------------------
+        # ⭐ 재고 먼저 저장
+        # ---------------------------------------------
 
-        save_to_sheets(
-            stock_data,
-            sales_data
+        save_stock_to_sheets(
+            stock_data
         )
 
         print(
@@ -1236,7 +1200,49 @@ def main():
         )
 
         print(
-            "🎉 동기화 완료!"
+            "📦 재고 동기화 완료!"
+        )
+
+        print(
+            "========================================"
+        )
+
+        # ---------------------------------------------
+        # 매출 조회
+        # ---------------------------------------------
+
+        try:
+
+            sales_data = get_sales(
+                session,
+                store_list
+            )
+
+            save_sales_to_sheets(
+                sales_data
+            )
+
+            print(
+                "💰 매출 동기화 완료!"
+            )
+
+        except Exception as e:
+
+            print(
+                f"⚠️ 매출 동기화 실패: {e}"
+            )
+
+            print(
+                "ℹ️ 매출 오류와 관계없이 "
+                "재고 데이터는 정상 저장되었습니다."
+            )
+
+        print(
+            "========================================"
+        )
+
+        print(
+            "🎉 재고 동기화 완료!"
         )
 
         print(
