@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import urllib.parse
@@ -2657,4 +2656,4 @@ def main():
 if __name__ == "__main__":
 
     main()
-```
+
