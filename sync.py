@@ -844,11 +844,48 @@ def get_sales_page(
                 f"응답: {res.status_code}"
             )
 
-            if res.status_code == 200:
+if res.status_code == 200:
 
-                try:
+    # 🔍 매출 API 실제 데이터 확인
+    try:
+        debug_data = res.json()
 
-                    data = res.json()
+        if isinstance(debug_data, dict):
+            debug_orders = debug_data.get("data", [])
+        else:
+            debug_orders = debug_data
+
+        print("========== 매출 API DEBUG ==========")
+        print("주문 개수:", len(debug_orders))
+
+        for i, order in enumerate(debug_orders[:3], 1):
+
+            print(f"--- 주문 {i} ---")
+
+            print("idx:", order.get("idx"))
+            print("datetime:", order.get("datetime"))
+            print("order_type:", order.get("order_type"))
+            print("store_name:", order.get("store_name"))
+            print("receipt:", order.get("receipt"))
+            print(
+                "items:",
+                len(order.get("items", []))
+            )
+
+            if order.get("items"):
+                print(
+                    "첫 상품:",
+                    order["items"][0]
+                )
+
+        print("====================================")
+
+    except Exception as e:
+        print("DEBUG 오류:", e)
+
+    try:
+
+        data = res.json()
 
                 except Exception as e:
 
