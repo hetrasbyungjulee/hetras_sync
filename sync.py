@@ -797,13 +797,8 @@ def save_stock_to_sheets(stock_data):
         f"{len(stock_rows)}건 저장 완료"
     )
 
-
 # =====================================================
 # 5. 매출 API 한 페이지
-#
-# 핵심:
-# 기존 코드에서 sort 파라미터 때문에 500이 발생할
-# 가능성을 제거하고 기본 order API로 호출
 # =====================================================
 
 def get_sales_page(
@@ -812,12 +807,8 @@ def get_sales_page(
 ):
 
     params = {
-
-        "page":
-            page,
-
-        "perPage":
-            PER_PAGE,
+        "page": page,
+        "perPage": PER_PAGE,
     }
 
     last_error = None
@@ -830,11 +821,8 @@ def get_sales_page(
         try:
 
             res = session.get(
-
                 f"{BASE_URL}/order",
-
                 params=params,
-
                 timeout=60,
             )
 
@@ -844,54 +832,122 @@ def get_sales_page(
                 f"응답: {res.status_code}"
             )
 
-if res.status_code == 200:
+            if res.status_code == 200:
 
-    # 🔍 매출 API 실제 데이터 확인
-    try:
-        debug_data = res.json()
+                # =========================================
+                # 🔍 매출 API 실제 데이터 확인
+                # =========================================
 
-        if isinstance(debug_data, dict):
-            debug_orders = debug_data.get("data", [])
-        else:
-            debug_orders = debug_data
+                try:
 
-        print("========== 매출 API DEBUG ==========")
-        print("주문 개수:", len(debug_orders))
+                    data = res.json()
 
-        for i, order in enumerate(debug_orders[:3], 1):
+                    if isinstance(
+                        data,
+                        dict
+                    ):
 
-            print(f"--- 주문 {i} ---")
+                        debug_orders = data.get(
+                            "data",
+                            []
+                        )
 
-            print("idx:", order.get("idx"))
-            print("datetime:", order.get("datetime"))
-            print("order_type:", order.get("order_type"))
-            print("store_name:", order.get("store_name"))
-            print("receipt:", order.get("receipt"))
-            print(
-                "items:",
-                len(order.get("items", []))
-            )
+                    else:
 
-            if order.get("items"):
-                print(
-                    "첫 상품:",
-                    order["items"][0]
-                )
+                        debug_orders = data
 
-        print("====================================")
+                    print(
+                        "========== 매출 API DEBUG =========="
+                    )
 
-    except Exception as e:
-        print("DEBUG 오류:", e)
+                    print(
+                        "주문 개수:",
+                        len(debug_orders)
+                    )
 
-    try:
+                    for i, order in enumerate(
+                        debug_orders[:3],
+                        1
+                    ):
 
-        data = res.json()
+                        if not isinstance(
+                            order,
+                            dict
+                        ):
+                            continue
+
+                        print(
+                            f"--- 주문 {i} ---"
+                        )
+
+                        print(
+                            "idx:",
+                            order.get(
+                                "idx"
+                            )
+                        )
+
+                        print(
+                            "datetime:",
+                            order.get(
+                                "datetime"
+                            )
+                        )
+
+                        print(
+                            "order_type:",
+                            order.get(
+                                "order_type"
+                            )
+                        )
+
+                        print(
+                            "store_name:",
+                            order.get(
+                                "store_name"
+                            )
+                        )
+
+                        print(
+                            "receipt:",
+                            order.get(
+                                "receipt"
+                            )
+                        )
+
+                        print(
+                            "items:",
+                            len(
+                                order.get(
+                                    "items",
+                                    []
+                                )
+                            )
+                        )
+
+                        if order.get(
+                            "items"
+                        ):
+
+                            print(
+                                "첫 상품:",
+                                order["items"][0]
+                            )
+
+                    print(
+                        "===================================="
+                    )
 
                 except Exception as e:
 
-                    raise Exception(
-                        f"JSON 파싱 실패: {e}"
+                    print(
+                        "DEBUG 오류:",
+                        e
                     )
+
+                # =========================================
+                # 기존 처리
+                # =========================================
 
                 if isinstance(
                     data,
@@ -911,11 +967,9 @@ if res.status_code == 200:
                 )
 
                 last_page = (
-
                     data.get(
                         "last_page"
                     )
-
                     or meta.get(
                         "last_page",
                         1
@@ -958,7 +1012,6 @@ if res.status_code == 200:
         f"(page {page}): "
         f"{last_error}"
     )
-
 
 # =====================================================
 # 6. 기존 매출 확인
