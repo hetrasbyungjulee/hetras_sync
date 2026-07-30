@@ -1412,46 +1412,34 @@ def get_sales(
     )
 
     all_sales = []
-
     total_pages_checked = 0
-
-    # -------------------------------------------------
-    # 매장별 조회
-    # -------------------------------------------------
 
     for store_name, store_idx in store_list.items():
 
         print("")
+        print("========================================")
         print(
-            "========================================"
+            f"🏪 [{store_name}] 매출 조회 시작"
         )
-
-        print(
-            f"🏪 [{store_name}] "
-            f"매출 조회 시작"
-        )
-
         print(
             f"  store_idx={store_idx}"
         )
 
         # ---------------------------------------------
-        # 첫 페이지
+        # 첫 페이지 조회
         # ---------------------------------------------
 
         first_orders, last_page = get_sales_page(
-
             session,
-
             1,
-
             store_idx
         )
 
+        total_pages_checked += 1
+
         print(
             f"  📄 [{store_name}] "
-            f"전체 페이지: "
-            f"{last_page:,}"
+            f"전체 페이지: {last_page:,}"
         )
 
         if not first_orders:
@@ -1464,173 +1452,455 @@ def get_sales(
             continue
 
         # ---------------------------------------------
-        # 최신 → 과거
+        # 첫 페이지 날짜 확인
         # ---------------------------------------------
 
-        for page in range(
-            1,
-            last_page + 1
-        ):
+        first_dates = []
 
-            if page == 1:
+        for order in first_orders:
 
-                orders = first_orders
+            d = get_order_date(order)
 
-            else:
+            if d:
+                first_dates.append(d)
 
-                orders, _ = get_sales_page(
+        if not first_dates:
 
-                    session,
+            print(
+                f"  ⚠️ [{store_name}] "
+                "날짜가 있는 주문 데이터가 없습니다."
+            )
 
-                    page,
+            continue
 
-                    store_idx
-                )
+        first_oldest = min(first_dates)
+        first_newest = max(first_dates)
+
+        print(
+            f"  📅 page 1: "
+            f"{first_oldest} ~ {first_newest}"
+        )
+
+        # ---------------------------------------------
+        # page 2 확인
+        # 페이지 방향 판단
+        # ---------------------------------------------
+
+        direction = "unknown"
+
+        if last_page > 1:
+
+            second_orders, _ = get_sales_page(
+                session,
+                2,
+                store_idx
+            )
 
             total_pages_checked += 1
 
-            if not orders:
+            second_dates = []
 
-                print(
-                    f"  ⚠️ [{store_name}] "
-                    f"page {page}: 데이터 없음"
-                )
+            for order in second_orders:
 
-                break
-
-            sales = convert_orders_to_sales(
-
-                orders,
-
-                forced_store_name=store_name
-            )
-
-            new_count = 0
-
-            for sale in sales:
-
-                key = (
-
-                    sale["date"],
-
-                    sale["store"],
-
-                    sale["barcode"],
-
-                    sale["order_idx"],
-
-                    sale["item_idx"],
-
-                    sale["order_type"],
-                )
-
-                if key in existing_keys:
-
-                    continue
-
-                # 이번 실행 내 중복도 방지
-                if any(
-                    key == (
-                        x["date"],
-                        x["store"],
-                        x["barcode"],
-                        x["order_idx"],
-                        x["item_idx"],
-                        x["order_type"],
-                    )
-                    for x in all_sales
-                ):
-
-                    continue
-
-                all_sales.append(
-                    sale
-                )
-
-                new_count += 1
-
-            # -----------------------------------------
-            # 페이지 날짜 확인
-            # -----------------------------------------
-
-            dates = []
-
-            for order in orders:
-
-                d = get_order_date(
-                    order
-                )
+                d = get_order_date(order)
 
                 if d:
+                    second_dates.append(d)
 
-                    dates.append(d)
+            if second_dates:
 
-            newest_date = (
-                max(dates)
-                if dates
-                else None
-            )
+                second_oldest = min(second_dates)
+                second_newest = max(second_dates)
 
-            oldest_date = (
-                min(dates)
-                if dates
-                else None
+                print(
+                    f"  📅 page 2: "
+                    f"{second_oldest} ~ {second_newest}"
+                )
+
+                # page 번호가 올라갈수록 날짜가 최신이면
+                # 과거 → 최신 방향
+                if second_oldest > first_oldest:
+
+                    direction = "old_to_new"
+
+                # page 번호가 올라갈수록 날짜가 과거면
+                # 최신 → 과거 방향
+                elif second_newest < first_newest:
+
+                    direction = "new_to_old"
+
+        print(
+            f"  🧭 [{store_name}] "
+            f"페이지 방향: {direction}"
+        )
+
+        # =================================================
+        # 과거 → 최신
+        #
+        # 현재 로그는 이 경우에 해당할 가능성이 높음.
+        #
+        # 2,603페이지를 전부 읽지 않고
+        # 7월 1일 근처 페이지를 이진탐색
+        # =================================================
+
+        if direction == "old_to_new":
+
+            low = 1
+            high = last_page
+            target_page = last_page
+
+            while low <= high:
+
+                mid = (low + high) // 2
+
+                if mid == 1:
+
+                    orders = first_orders
+
+                else:
+
+                    orders, _ = get_sales_page(
+                        session,
+                        mid,
+                        store_idx
+                    )
+
+                    total_pages_checked += 1
+
+                if not orders:
+
+                    low = mid + 1
+                    continue
+
+                dates = []
+
+                for order in orders:
+
+                    d = get_order_date(order)
+
+                    if d:
+                        dates.append(d)
+
+                if not dates:
+
+                    low = mid + 1
+                    continue
+
+                oldest_date = min(dates)
+                newest_date = max(dates)
+
+                print(
+                    f"  🔎 [{store_name}] "
+                    f"탐색 page {mid}: "
+                    f"{oldest_date} ~ {newest_date}"
+                )
+
+                # 아직 7월 1일 이전이면
+                # 더 뒤쪽 페이지로 이동
+                if newest_date < SALES_START_DATE:
+
+                    low = mid + 1
+
+                else:
+
+                    # 7월 1일 이후 데이터가 나오는
+                    # 가장 앞쪽 페이지를 찾음
+                    target_page = mid
+                    high = mid - 1
+
+            # 경계에서 누락될 가능성을 줄이기 위해
+            # 앞쪽 2페이지부터 조회
+            start_page = max(
+                1,
+                target_page - 2
             )
 
             print(
-
-                f"  🔎 [{store_name}] "
-                f"page {page}: "
-                f"주문 {len(orders)}건 / "
-                f"신규 {new_count}건"
-
+                f"  🎯 [{store_name}] "
+                f"7월 1일 근처 시작 페이지: "
+                f"{start_page}"
             )
 
-            if (
-                newest_date
-                and oldest_date
+            for page in range(
+                start_page,
+                last_page + 1
             ):
 
-                print(
+                if page == 1:
 
-                    f"     📅 "
-                    f"{oldest_date} ~ "
-                    f"{newest_date}"
+                    orders = first_orders
+
+                else:
+
+                    orders, _ = get_sales_page(
+                        session,
+                        page,
+                        store_idx
+                    )
+
+                    total_pages_checked += 1
+
+                if not orders:
+                    continue
+
+                sales = convert_orders_to_sales(
+                    orders,
+                    forced_store_name=store_name
                 )
 
-            # -----------------------------------------
-            # 7월 1일보다 과거 도달
-            # -----------------------------------------
+                new_count = 0
 
-            if (
+                for sale in sales:
 
-                oldest_date is not None
+                    key = (
+                        sale["date"],
+                        sale["store"],
+                        sale["barcode"],
+                        sale["order_idx"],
+                        sale["item_idx"],
+                        sale["order_type"],
+                    )
 
-                and oldest_date < SALES_START_DATE
+                    if key in existing_keys:
+                        continue
+
+                    if any(
+                        key == (
+                            x["date"],
+                            x["store"],
+                            x["barcode"],
+                            x["order_idx"],
+                            x["item_idx"],
+                            x["order_type"],
+                        )
+                        for x in all_sales
+                    ):
+                        continue
+
+                    all_sales.append(sale)
+                    new_count += 1
+
+                dates = []
+
+                for order in orders:
+
+                    d = get_order_date(order)
+
+                    if d:
+                        dates.append(d)
+
+                if dates:
+
+                    print(
+                        f"  🔎 [{store_name}] "
+                        f"page {page}: "
+                        f"주문 {len(orders)}건 / "
+                        f"신규 {new_count}건"
+                    )
+
+                    print(
+                        f"     📅 "
+                        f"{min(dates)} ~ "
+                        f"{max(dates)}"
+                    )
+
+            print(
+                f"✅ [{store_name}] "
+                f"매장 조회 완료"
+            )
+
+        # =================================================
+        # 최신 → 과거
+        #
+        # 이 경우에는 기존 방식대로 최신부터 조회
+        # =================================================
+
+        elif direction == "new_to_old":
+
+            for page in range(
+                1,
+                last_page + 1
             ):
 
-                print(
+                if page == 1:
 
-                    f"  🛑 [{store_name}] "
-                    f"{SALES_START_DATE} "
-                    "이전 데이터 도달"
+                    orders = first_orders
+
+                else:
+
+                    orders, _ = get_sales_page(
+                        session,
+                        page,
+                        store_idx
+                    )
+
+                    total_pages_checked += 1
+
+                if not orders:
+                    continue
+
+                sales = convert_orders_to_sales(
+                    orders,
+                    forced_store_name=store_name
                 )
 
-                break
+                new_count = 0
 
-        print(
-            f"✅ [{store_name}] "
-            f"매장 조회 완료"
-        )
+                for sale in sales:
+
+                    key = (
+                        sale["date"],
+                        sale["store"],
+                        sale["barcode"],
+                        sale["order_idx"],
+                        sale["item_idx"],
+                        sale["order_type"],
+                    )
+
+                    if key in existing_keys:
+                        continue
+
+                    if any(
+                        key == (
+                            x["date"],
+                            x["store"],
+                            x["barcode"],
+                            x["order_idx"],
+                            x["item_idx"],
+                            x["order_type"],
+                        )
+                        for x in all_sales
+                    ):
+                        continue
+
+                    all_sales.append(sale)
+                    new_count += 1
+
+                dates = []
+
+                for order in orders:
+
+                    d = get_order_date(order)
+
+                    if d:
+                        dates.append(d)
+
+                if dates:
+
+                    oldest_date = min(dates)
+                    newest_date = max(dates)
+
+                    print(
+                        f"  🔎 [{store_name}] "
+                        f"page {page}: "
+                        f"주문 {len(orders)}건 / "
+                        f"신규 {new_count}건"
+                    )
+
+                    print(
+                        f"     📅 "
+                        f"{oldest_date} ~ "
+                        f"{newest_date}"
+                    )
+
+                    if oldest_date < SALES_START_DATE:
+
+                        print(
+                            f"  🛑 [{store_name}] "
+                            f"{SALES_START_DATE} "
+                            "이전 데이터 도달"
+                        )
+
+                        break
+
+            print(
+                f"✅ [{store_name}] "
+                f"매장 조회 완료"
+            )
+
+        # =================================================
+        # 방향 판단 실패
+        # 안전하게 전체 페이지 조회
+        # =================================================
+
+        else:
+
+            print(
+                f"  ⚠️ [{store_name}] "
+                "페이지 방향 판단 실패"
+            )
+
+            print(
+                "  🔄 안전 모드로 전체 페이지 조회"
+            )
+
+            for page in range(
+                1,
+                last_page + 1
+            ):
+
+                if page == 1:
+
+                    orders = first_orders
+
+                else:
+
+                    orders, _ = get_sales_page(
+                        session,
+                        page,
+                        store_idx
+                    )
+
+                    total_pages_checked += 1
+
+                if not orders:
+                    continue
+
+                sales = convert_orders_to_sales(
+                    orders,
+                    forced_store_name=store_name
+                )
+
+                for sale in sales:
+
+                    key = (
+                        sale["date"],
+                        sale["store"],
+                        sale["barcode"],
+                        sale["order_idx"],
+                        sale["item_idx"],
+                        sale["order_type"],
+                    )
+
+                    if key in existing_keys:
+                        continue
+
+                    if any(
+                        key == (
+                            x["date"],
+                            x["store"],
+                            x["barcode"],
+                            x["order_idx"],
+                            x["item_idx"],
+                            x["order_type"],
+                        )
+                        for x in all_sales
+                    ):
+                        continue
+
+                    all_sales.append(sale)
+
+            print(
+                f"✅ [{store_name}] "
+                f"매장 조회 완료"
+            )
 
     # =================================================
     # 최종 결과
     # =================================================
 
     print("")
-    print(
-        "========================================"
-    )
+    print("========================================")
 
     print(
         f"📊 전체 매장 신규 데이터: "
@@ -1655,51 +1925,29 @@ def get_sales(
         if store not in store_summary:
 
             store_summary[store] = {
-
-                "count":
-                    0,
-
-                "qty":
-                    0,
-
-                "return_count":
-                    0,
-
-                "return_qty":
-                    0,
+                "count": 0,
+                "qty": 0,
+                "return_count": 0,
+                "return_qty": 0,
             }
 
         if sale["order_type"] == "반품":
 
-            store_summary[store][
-                "return_count"
-            ] += 1
-
-            store_summary[store][
-                "return_qty"
-            ] += sale["qty"]
+            store_summary[store]["return_count"] += 1
+            store_summary[store]["return_qty"] += sale["qty"]
 
         else:
 
-            store_summary[store][
-                "count"
-            ] += 1
-
-            store_summary[store][
-                "qty"
-            ] += sale["qty"]
+            store_summary[store]["count"] += 1
+            store_summary[store]["qty"] += sale["qty"]
 
     print("")
-    print(
-        "📊 매장별 신규 매출 요약"
-    )
+    print("📊 매장별 신규 매출 요약")
 
     for store_name in store_list.keys():
 
         summary = store_summary.get(
-
             store_name,
-
             {
                 "count": 0,
                 "qty": 0,
@@ -1709,30 +1957,20 @@ def get_sales(
         )
 
         net_qty = (
-
             summary["qty"]
-
             - summary["return_qty"]
         )
 
         print(
-
             f"  • {store_name}: "
-
             f"판매 {summary['count']:,}건 / "
-
             f"{summary['qty']:,}개 / "
-
             f"반품 {summary['return_count']:,}건 / "
-
             f"{summary['return_qty']:,}개 / "
-
             f"순판매 {net_qty:,}개"
         )
 
-    print(
-        "========================================"
-    )
+    print("========================================")
 
     return all_sales
 
