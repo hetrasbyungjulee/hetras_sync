@@ -15,10 +15,16 @@ from google.oauth2.service_account import Credentials
 # 1. 셀메이트 로그인
 # 2. 매장 목록 조회
 # 3. 현재 재고 전체 조회
-# 4. 2026-07-01 이후 판매내역 누적 저장
+# 4. 2026-07-01 이후 판매/반품 내역 누적 저장
 # 5. 판매내역 중복 저장 방지
 # 6. 최근 14일 판매량 계산
 # 7. 최근 14일 일평균 판매량 계산
+#
+# ※ 셀메이트 매출 API는
+#    page=1이 오래된 데이터,
+#    마지막 page가 최신 데이터인 구조
+#
+#    따라서 마지막 페이지부터 역순으로 조회한다.
 # =====================================================
 
 
@@ -27,7 +33,9 @@ from google.oauth2.service_account import Credentials
 # =====================================================
 
 SELLMATE_ID = os.environ["SELLMATE_ID"]
+
 SELLMATE_PW = os.environ["SELLMATE_PW"]
+
 SELLMATE_DOMAIN = os.environ.get(
     "SELLMATE_DOMAIN",
     "hetras"
@@ -59,7 +67,7 @@ SALES_START_DATE = datetime.strptime(
 # 최근 14일 평균
 SALES_AVERAGE_DAYS = 14
 
-# API 500/timeout 재시도
+# API 재시도
 API_RETRY_COUNT = 3
 
 # Google Sheets 저장 단위
@@ -67,10 +75,51 @@ SHEET_CHUNK_SIZE = 5000
 
 
 # =====================================================
+# Google Sheets 헤더
+# =====================================================
+
+SALES_HEADER = [
+    "날짜",
+    "매장",
+    "바코드",
+    "상품명",
+    "옵션명",
+    "판매수량",
+    "영수증번호",
+    "주문번호",
+    "상품순번",
+    "주문일시",
+    "구분",
+]
+
+STOCK_HEADER = [
+    "날짜",
+    "매장",
+    "바코드",
+    "상품명",
+    "옵션명",
+    "현재고",
+]
+
+SPEED_HEADER = [
+    "기준일",
+    "조회기간",
+    "매장",
+    "바코드",
+    "상품명",
+    "옵션명",
+    "14일 판매수량",
+    "일평균 판매수량",
+    "계산일수",
+]
+
+
+# =====================================================
 # 공통 함수
 # =====================================================
 
 def norm(value):
+
     return (
         str(value)
         .strip()
@@ -80,6 +129,7 @@ def norm(value):
 
 
 def get_today():
+
     return datetime.now(
         timezone.utc
     ).astimezone().date()
@@ -110,9 +160,11 @@ def login():
 
     session.headers.update({
 
-        "Content-Type": "application/json",
+        "Content-Type":
+            "application/json",
 
-        "Accept": "application/json",
+        "Accept":
+            "application/json",
 
         "x-pos-domain":
             SELLMATE_DOMAIN,
@@ -134,9 +186,12 @@ def login():
 
         "User-Agent":
             (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/151.0.0.0 Safari/537.36"
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/151.0.0.0 "
+                "Safari/537.36"
             ),
     })
 
@@ -285,9 +340,11 @@ def get_store_list(session):
         )
 
     try:
+
         raw = res.json()
 
     except Exception:
+
         raise Exception(
             "매장 API 응답이 JSON이 아닙니다."
         )
@@ -358,8 +415,11 @@ def get_all_stock(
     print("📦 재고 데이터 조회 중...")
 
     idx_to_store = {
+
         value: key
-        for key, value in store_list.items()
+
+        for key, value
+        in store_list.items()
     }
 
     all_stock = []
@@ -375,6 +435,7 @@ def get_all_stock(
                 f"{BASE_URL}/product/variant/stock",
 
                 params={
+
                     "page":
                         page,
 
@@ -406,9 +467,11 @@ def get_all_stock(
             )
 
         try:
+
             data = res.json()
 
         except Exception:
+
             raise Exception(
                 f"재고 API JSON 파싱 실패 "
                 f"(page {page})"
@@ -417,6 +480,7 @@ def get_all_stock(
         if isinstance(data, list):
 
             items = data
+
             last_page = 1
 
         else:
@@ -437,6 +501,7 @@ def get_all_stock(
             )
 
         if not items:
+
             break
 
         for item in items:
@@ -635,6 +700,7 @@ def get_all_stock(
         )
 
         if page >= last_page:
+
             break
 
         page += 1
@@ -681,21 +747,12 @@ def save_stock_to_sheets(stock_data):
         ws = sh.add_worksheet(
             title="재고데이터",
             rows=10000,
-            cols=6,
+            cols=len(STOCK_HEADER),
         )
 
     today = get_today().strftime(
         "%Y-%m-%d"
     )
-
-    header = [
-        "날짜",
-        "매장",
-        "바코드",
-        "상품명",
-        "옵션명",
-        "현재고",
-    ]
 
     existing = ws.get_all_values()
 
@@ -780,7 +837,7 @@ def save_stock_to_sheets(stock_data):
         )
 
     all_rows = [
-        header,
+        STOCK_HEADER,
         *rows_to_keep,
         *stock_rows,
     ]
@@ -797,6 +854,7 @@ def save_stock_to_sheets(stock_data):
         f"{len(stock_rows)}건 저장 완료"
     )
 
+
 # =====================================================
 # 5. 매출 API 한 페이지
 # =====================================================
@@ -807,8 +865,12 @@ def get_sales_page(
 ):
 
     params = {
-        "page": page,
-        "perPage": PER_PAGE,
+
+        "page":
+            page,
+
+        "perPage":
+            PER_PAGE,
     }
 
     last_error = None
@@ -821,8 +883,11 @@ def get_sales_page(
         try:
 
             res = session.get(
+
                 f"{BASE_URL}/order",
+
                 params=params,
+
                 timeout=60,
             )
 
@@ -834,120 +899,15 @@ def get_sales_page(
 
             if res.status_code == 200:
 
-                # =========================================
-                # 🔍 매출 API 실제 데이터 확인
-                # =========================================
-
                 try:
 
                     data = res.json()
 
-                    if isinstance(
-                        data,
-                        dict
-                    ):
-
-                        debug_orders = data.get(
-                            "data",
-                            []
-                        )
-
-                    else:
-
-                        debug_orders = data
-
-                    print(
-                        "========== 매출 API DEBUG =========="
-                    )
-
-                    print(
-                        "주문 개수:",
-                        len(debug_orders)
-                    )
-
-                    for i, order in enumerate(
-                        debug_orders[:3],
-                        1
-                    ):
-
-                        if not isinstance(
-                            order,
-                            dict
-                        ):
-                            continue
-
-                        print(
-                            f"--- 주문 {i} ---"
-                        )
-
-                        print(
-                            "idx:",
-                            order.get(
-                                "idx"
-                            )
-                        )
-
-                        print(
-                            "datetime:",
-                            order.get(
-                                "datetime"
-                            )
-                        )
-
-                        print(
-                            "order_type:",
-                            order.get(
-                                "order_type"
-                            )
-                        )
-
-                        print(
-                            "store_name:",
-                            order.get(
-                                "store_name"
-                            )
-                        )
-
-                        print(
-                            "receipt:",
-                            order.get(
-                                "receipt"
-                            )
-                        )
-
-                        print(
-                            "items:",
-                            len(
-                                order.get(
-                                    "items",
-                                    []
-                                )
-                            )
-                        )
-
-                        if order.get(
-                            "items"
-                        ):
-
-                            print(
-                                "첫 상품:",
-                                order["items"][0]
-                            )
-
-                    print(
-                        "===================================="
-                    )
-
                 except Exception as e:
 
-                    print(
-                        "DEBUG 오류:",
-                        e
+                    raise Exception(
+                        f"JSON 파싱 실패: {e}"
                     )
-
-                # =========================================
-                # 기존 처리
-                # =========================================
 
                 if isinstance(
                     data,
@@ -967,17 +927,20 @@ def get_sales_page(
                 )
 
                 last_page = (
+
                     data.get(
                         "last_page"
                     )
+
                     or meta.get(
                         "last_page",
                         1
                     )
                 )
 
-                return orders, int(
-                    last_page
+                return (
+                    orders,
+                    int(last_page)
                 )
 
             last_error = (
@@ -1001,6 +964,16 @@ def get_sales_page(
                 f"{e}"
             )
 
+        except Exception as e:
+
+            last_error = str(e)
+
+            print(
+                f"  ⚠️ 매출 데이터 처리 오류 "
+                f"{attempt}/{API_RETRY_COUNT}: "
+                f"{e}"
+            )
+
         if attempt < API_RETRY_COUNT:
 
             time.sleep(
@@ -1013,107 +986,61 @@ def get_sales_page(
         f"{last_error}"
     )
 
+
 # =====================================================
-# 6. 기존 매출 확인
+# 6. 주문 날짜 확인
 # =====================================================
 
-def get_existing_sales_state(ws):
+def get_order_dates(orders):
 
-    print(
-        "🔎 기존 매출 데이터 확인 중..."
-    )
+    dates = []
 
-    records = ws.get_all_values()
+    for order in orders:
 
-    if not records:
-
-        print(
-            "  기존 매출 데이터: 0건"
-        )
-
-        return set()
-
-    header = records[0]
-
-    required = [
-        "날짜",
-        "매장",
-        "바코드",
-        "판매수량",
-        "영수증번호",
-    ]
-
-    for field in required:
-
-        if field not in header:
-
-            print(
-                "  ⚠️ 기존 매출 시트 "
-                "헤더가 예상과 다릅니다."
-            )
-
-            return set()
-
-    date_idx = header.index(
-        "날짜"
-    )
-
-    store_idx = header.index(
-        "매장"
-    )
-
-    barcode_idx = header.index(
-        "바코드"
-    )
-
-    qty_idx = header.index(
-        "판매수량"
-    )
-
-    receipt_idx = header.index(
-        "영수증번호"
-    )
-
-    existing_keys = set()
-
-    for row in records[1:]:
-
-        if len(row) <= max(
-            date_idx,
-            store_idx,
-            barcode_idx,
-            qty_idx,
-            receipt_idx
+        if not isinstance(
+            order,
+            dict
         ):
             continue
 
-        key = (
-
-            row[date_idx],
-
-            row[store_idx],
-
-            row[barcode_idx],
-
-            row[receipt_idx],
-
-            row[qty_idx],
+        datetime_text = str(
+            order.get(
+                "datetime",
+                ""
+            )
+            or ""
         )
 
-        existing_keys.add(
-            key
-        )
+        if not datetime_text:
+            continue
 
-    print(
-        f"  기존 매출 데이터: "
-        f"{len(existing_keys):,}건"
+        try:
+
+            order_date = datetime.strptime(
+                datetime_text[:10],
+                "%Y-%m-%d"
+            ).date()
+
+            dates.append(
+                order_date
+            )
+
+        except ValueError:
+
+            continue
+
+    if not dates:
+
+        return None, None
+
+    return (
+        min(dates),
+        max(dates)
     )
-
-    return existing_keys
 
 
 # =====================================================
-# 7. 주문 → 판매내역
+# 7. 주문 → 판매/반품 내역
 # =====================================================
 
 def convert_orders_to_sales(
@@ -1136,16 +1063,7 @@ def convert_orders_to_sales(
                 ""
             )
             or ""
-        )
-
-        # 판매만 저장
-        if order_type not in (
-            "",
-            "판매",
-            "sale",
-            "normal",
-        ):
-            continue
+        ).strip()
 
         datetime_text = str(
             order.get(
@@ -1171,8 +1089,8 @@ def convert_orders_to_sales(
 
             continue
 
-        # 2026-07-01 이전은 저장하지 않음
         if sale_date < SALES_START_DATE:
+
             continue
 
         store_name = norm(
@@ -1190,9 +1108,12 @@ def convert_orders_to_sales(
             or ""
         )
 
-        order_idx = order.get(
-            "idx",
-            ""
+        order_idx = str(
+            order.get(
+                "idx",
+                ""
+            )
+            or ""
         )
 
         items = (
@@ -1202,7 +1123,10 @@ def convert_orders_to_sales(
             or []
         )
 
-        for item in items:
+        for item_position, item in enumerate(
+            items,
+            start=1
+        ):
 
             if not isinstance(
                 item,
@@ -1240,8 +1164,34 @@ def convert_orders_to_sales(
 
                 qty = 0
 
-            if qty <= 0:
+            if qty == 0:
                 continue
+
+            # -------------------------------------------------
+            # 판매 / 반품 구분
+            # -------------------------------------------------
+
+            if order_type in (
+                "반품",
+                "return",
+                "refund",
+            ):
+
+                sale_type = "반품"
+
+                # 셀메이트에서 이미 -1로 내려오지만
+                # 혹시 +1로 내려오는 경우에도 반품은 음수 처리
+                if qty > 0:
+                    qty = -qty
+
+            else:
+
+                sale_type = "판매"
+
+                # 판매인데 음수로 내려오면 그대로 두지 않고
+                # 정상 판매 수량으로 보정
+                if qty < 0:
+                    qty = abs(qty)
 
             sales.append({
 
@@ -1281,15 +1231,206 @@ def convert_orders_to_sales(
                 "order_idx":
                     order_idx,
 
+                "item_idx":
+                    str(
+                        item.get(
+                            "idx",
+                            ""
+                        )
+                        or item_position
+                    ),
+
                 "datetime":
                     datetime_text,
+
+                "type":
+                    sale_type,
             })
 
     return sales
 
 
 # =====================================================
-# 8. 매출 조회
+# 8. 매출 중복 방지 Key
+# =====================================================
+
+def make_sales_key_from_sale(sale):
+
+    return (
+
+        str(
+            sale.get(
+                "date",
+                ""
+            )
+        ),
+
+        str(
+            sale.get(
+                "store",
+                ""
+            )
+        ),
+
+        str(
+            sale.get(
+                "barcode",
+                ""
+            )
+        ),
+
+        str(
+            sale.get(
+                "receipt",
+                ""
+            )
+        ),
+
+        str(
+            sale.get(
+                "order_idx",
+                ""
+            )
+        ),
+
+        str(
+            sale.get(
+                "item_idx",
+                ""
+            )
+        ),
+    )
+
+
+def make_sales_key_from_row(
+    row,
+    header
+):
+
+    try:
+
+        date = row[
+            header.index("날짜")
+        ]
+
+        store = row[
+            header.index("매장")
+        ]
+
+        barcode = row[
+            header.index("바코드")
+        ]
+
+        receipt = row[
+            header.index("영수증번호")
+        ]
+
+        order_idx = row[
+            header.index("주문번호")
+        ]
+
+        item_idx = row[
+            header.index("상품순번")
+        ]
+
+        return (
+
+            date,
+            store,
+            barcode,
+            receipt,
+            order_idx,
+            item_idx,
+        )
+
+    except (
+        ValueError,
+        IndexError
+    ):
+
+        return None
+
+
+# =====================================================
+# 9. 기존 매출 확인
+# =====================================================
+
+def get_existing_sales_state(ws):
+
+    print(
+        "🔎 기존 매출 데이터 확인 중..."
+    )
+
+    records = ws.get_all_values()
+
+    if not records:
+
+        print(
+            "  기존 매출 데이터: 0건"
+        )
+
+        return set()
+
+    header = records[0]
+
+    required = [
+        "날짜",
+        "매장",
+        "바코드",
+        "영수증번호",
+        "주문번호",
+        "상품순번",
+    ]
+
+    missing = [
+        field
+        for field in required
+        if field not in header
+    ]
+
+    if missing:
+
+        print(
+            "  ⚠️ 기존 매출 시트 헤더가 "
+            "새 구조와 다릅니다."
+        )
+
+        print(
+            f"  누락 헤더: {missing}"
+        )
+
+        print(
+            "  ℹ️ 기존 데이터를 "
+            "새 구조로 재구축합니다."
+        )
+
+        return set()
+
+    existing_keys = set()
+
+    for row in records[1:]:
+
+        key = make_sales_key_from_row(
+            row,
+            header
+        )
+
+        if key:
+
+            existing_keys.add(
+                key
+            )
+
+    print(
+        f"  기존 매출 데이터: "
+        f"{len(existing_keys):,}건"
+    )
+
+    return existing_keys
+
+
+# =====================================================
+# 10. 매출 조회
 # =====================================================
 
 def get_sales(
@@ -1306,15 +1447,17 @@ def get_sales(
         f"{SALES_START_DATE}"
     )
 
-    # -------------------------------------------------
-    # page 1
-    # -------------------------------------------------
+    # =================================================
+    # 먼저 page=1에서 전체 페이지 수만 확인
+    # =================================================
 
-    first_orders, last_page = (
-        get_sales_page(
-            session,
-            1
-        )
+    print(
+        "  🔎 전체 매출 페이지 확인 중..."
+    )
+
+    _, last_page = get_sales_page(
+        session,
+        1
     )
 
     print(
@@ -1322,230 +1465,157 @@ def get_sales(
         f"{last_page:,}"
     )
 
-    if not first_orders:
+    if last_page <= 0:
 
         print(
-            "⚠️ page 1 주문 데이터가 없습니다."
+            "⚠️ 매출 페이지가 없습니다."
         )
 
         return []
 
-    first_sales = (
-        convert_orders_to_sales(
-            first_orders
-        )
-    )
-
-    # -------------------------------------------------
-    # 기존 매출이 없으면
-    # 7월 1일부터 과거 방향으로 내려감
-    # -------------------------------------------------
-
-    if not existing_keys:
-
-        print(
-            "🆕 기존 매출 데이터가 없습니다."
-        )
-
-        print(
-            f"📥 {SALES_START_DATE} 이후 "
-            "판매내역을 구축합니다."
-        )
-
-        all_sales = []
-
-        # page 1
-        all_sales.extend(
-            first_sales
-        )
-
-        # page 2부터
-        for page in range(
-            2,
-            last_page + 1
-        ):
-
-            orders, _ = get_sales_page(
-                session,
-                page
-            )
-
-            if not orders:
-
-                print(
-                    f"  ⚠️ page {page}: "
-                    "주문 데이터 없음"
-                )
-
-                break
-
-            # 페이지에서 가장 오래된 날짜 확인
-            oldest_date = None
-
-            for order in orders:
-
-                if not isinstance(
-                    order,
-                    dict
-                ):
-                    continue
-
-                datetime_text = str(
-                    order.get(
-                        "datetime",
-                        ""
-                    )
-                    or ""
-                )
-
-                if not datetime_text:
-                    continue
-
-                try:
-
-                    order_date = datetime.strptime(
-                        datetime_text[:10],
-                        "%Y-%m-%d"
-                    ).date()
-
-                except ValueError:
-
-                    continue
-
-                if (
-                    oldest_date is None
-                    or order_date < oldest_date
-                ):
-
-                    oldest_date = order_date
-
-            sales = convert_orders_to_sales(
-                orders
-            )
-
-            all_sales.extend(
-                sales
-            )
-
-            if page % 10 == 0:
-
-                print(
-                    f"  📥 page "
-                    f"{page:,}/{last_page:,} "
-                    f"누적 {len(all_sales):,}건"
-                )
-
-            # 7월 1일보다 과거가 나왔다면 종료
-            if (
-                oldest_date is not None
-                and oldest_date < SALES_START_DATE
-            ):
-
-                print(
-                    f"  🛑 "
-                    f"{SALES_START_DATE} 이전 "
-                    "데이터 도달"
-                )
-
-                break
-
-        print(
-            f"✅ 7월 이후 판매내역 "
-            f"{len(all_sales):,}건 확보"
-        )
-
-        return all_sales
-
-    # -------------------------------------------------
-    # 기존 데이터가 있으면
-    # 최신 페이지부터 신규만 확인
-    # -------------------------------------------------
+    # =================================================
+    # 중요:
+    #
+    # 셀메이트는 page=1이 과거
+    # 마지막 page가 최신
+    #
+    # 따라서 마지막 페이지부터 역순으로 조회
+    # =================================================
 
     print(
-        "🔄 기존 매출 데이터가 있습니다."
+        "  🔄 최신 매출부터 "
+        "역순으로 조회합니다."
     )
 
-    print(
-        "📥 신규 판매내역을 확인합니다."
-    )
+    all_new_sales = []
 
-    new_sales = []
+    page = last_page
 
-    page = 1
+    pages_checked = 0
 
-    while page <= last_page:
+    while page >= 1:
 
         orders, _ = get_sales_page(
             session,
             page
         )
 
+        pages_checked += 1
+
         if not orders:
-            break
 
-        sales = convert_orders_to_sales(
-            orders
+            print(
+                f"  ⚠️ page {page}: "
+                "주문 데이터 없음"
+            )
+
+            page -= 1
+
+            continue
+
+        oldest_date, newest_date = (
+            get_order_dates(
+                orders
+            )
         )
-
-        new_count = 0
-
-        for sale in sales:
-
-            key = (
-
-                sale["date"],
-
-                sale["store"],
-
-                sale["barcode"],
-
-                sale["receipt"],
-
-                str(
-                    sale["qty"]
-                ),
-            )
-
-            if key in existing_keys:
-                continue
-
-            new_sales.append(
-                sale
-            )
-
-            new_count += 1
 
         print(
-            f"  🔎 page {page}: "
-            f"주문 {len(orders)}건 / "
-            f"신규 {new_count}건"
+            f"  📅 page {page:,}: "
+            f"{oldest_date} ~ {newest_date}"
         )
 
-        # 현재 페이지가 전부 기존 데이터라면
-        # 그 아래 페이지는 더 오래된 데이터이므로 종료
+        # =================================================
+        # 7월 1일보다 오래된 페이지
+        # =================================================
+
         if (
-            sales
-            and new_count == 0
+            oldest_date is not None
+            and oldest_date < SALES_START_DATE
         ):
 
             print(
-                "  🛑 기존 데이터 구간 도달"
+                f"  🛑 "
+                f"{SALES_START_DATE} 이전 "
+                "데이터 도달"
+            )
+
+            # 페이지 안에 7월 데이터가 섞여 있을 수 있으므로
+            # convert 함수가 7월 이후만 자동 필터링
+            sales = convert_orders_to_sales(
+                orders
+            )
+
+        else:
+
+            sales = convert_orders_to_sales(
+                orders
+            )
+
+        page_new_count = 0
+
+        for sale in sales:
+
+            key = make_sales_key_from_sale(
+                sale
+            )
+
+            if key in existing_keys:
+
+                continue
+
+            if key in {
+                make_sales_key_from_sale(x)
+                for x in all_new_sales
+            }:
+
+                continue
+
+            all_new_sales.append(
+                sale
+            )
+
+            page_new_count += 1
+
+        print(
+            f"  🔎 page {page:,}: "
+            f"주문 {len(orders):,}건 / "
+            f"신규 {page_new_count:,}건"
+        )
+
+        # =================================================
+        # 7월 1일 이전 도달
+        # =================================================
+
+        if (
+            oldest_date is not None
+            and oldest_date < SALES_START_DATE
+        ):
+
+            print(
+                "  ✅ 7월 전체 범위 "
+                "조회 완료"
             )
 
             break
 
-        page += 1
+        page -= 1
 
     print(
-        f"✅ 이번 실행 신규 판매내역: "
-        f"{len(new_sales):,}건"
+        f"✅ 이번 실행 신규 "
+        f"판매/반품 내역: "
+        f"{len(all_new_sales):,}건"
     )
 
-    return new_sales
+    print(
+        f"  🔎 확인 페이지: "
+        f"{pages_checked:,}개"
+    )
+
+    return all_new_sales
 
 
 # =====================================================
-# 9. 매출 저장
+# 11. 매출 저장
 # =====================================================
 
 def save_sales_to_sheets(
@@ -1577,98 +1647,92 @@ def save_sales_to_sheets(
 
             rows=100000,
 
-            cols=8,
+            cols=len(SALES_HEADER),
         )
 
-    header = [
-
-        "날짜",
-
-        "매장",
-
-        "바코드",
-
-        "상품명",
-
-        "옵션명",
-
-        "판매수량",
-
-        "영수증번호",
-
-        "주문번호",
-    ]
-
     existing = ws.get_all_values()
+
+    # =================================================
+    # 신규 시트
+    # =================================================
 
     if not existing:
 
         ws.update(
+
             range_name="A1",
-            values=[header],
+
+            values=[
+                SALES_HEADER
+            ],
         )
 
-        existing = [header]
+        existing = [
+            SALES_HEADER
+        ]
+
+    # =================================================
+    # 기존 헤더 확인
+    # =================================================
+
+    header = existing[0]
+
+    if header != SALES_HEADER:
+
+        print(
+            "  ⚠️ 기존 매출 시트 헤더가 "
+            "새 구조와 다릅니다."
+        )
+
+        print(
+            "  🔄 매출데이터 시트를 "
+            "새 구조로 초기화합니다."
+        )
+
+        ws.clear()
+
+        ws.update(
+
+            range_name="A1",
+
+            values=[
+                SALES_HEADER
+            ],
+        )
+
+        existing = [
+            SALES_HEADER
+        ]
+
+    # =================================================
+    # 기존 중복 Key
+    # =================================================
 
     existing_keys = set()
 
     for row in existing[1:]:
 
-        if len(row) < 8:
-            continue
-
-        key = (
-
-            row[0],
-
-            row[1],
-
-            row[2],
-
-            row[6],
-
-            row[5],
+        key = make_sales_key_from_row(
+            row,
+            SALES_HEADER
         )
 
-        existing_keys.add(
-            key
-        )
+        if key:
+
+            existing_keys.add(
+                key
+            )
 
     rows = []
 
     for sale in sales_data:
 
-        key = (
-
-            sale.get(
-                "date",
-                ""
-            ),
-
-            sale.get(
-                "store",
-                ""
-            ),
-
-            sale.get(
-                "barcode",
-                ""
-            ),
-
-            sale.get(
-                "receipt",
-                ""
-            ),
-
-            str(
-                sale.get(
-                    "qty",
-                    0
-                )
-            ),
+        key = make_sales_key_from_sale(
+            sale
         )
 
         if key in existing_keys:
+
             continue
 
         rows.append([
@@ -1712,6 +1776,21 @@ def save_sales_to_sheets(
                 "order_idx",
                 ""
             ),
+
+            sale.get(
+                "item_idx",
+                ""
+            ),
+
+            sale.get(
+                "datetime",
+                ""
+            ),
+
+            sale.get(
+                "type",
+                ""
+            ),
         ])
 
         existing_keys.add(
@@ -1721,13 +1800,15 @@ def save_sales_to_sheets(
     if not rows:
 
         print(
-            "  ℹ️ 새로 저장할 매출이 없습니다."
+            "  ℹ️ 새로 저장할 "
+            "매출/반품이 없습니다."
         )
 
         return
 
     print(
-        f"  📦 신규 저장 매출: "
+        f"  📦 신규 저장 "
+        f"매출/반품: "
         f"{len(rows):,}건"
     )
 
@@ -1759,7 +1840,7 @@ def save_sales_to_sheets(
 
             range_name=(
                 f"A{current_start}:"
-                f"H{current_end}"
+                f"K{current_end}"
             ),
 
             values=chunk,
@@ -1772,13 +1853,14 @@ def save_sales_to_sheets(
         )
 
     print(
-        f"🎉 신규 매출 "
+        f"🎉 신규 "
+        f"매출/반품 "
         f"{len(rows):,}건 저장 완료"
     )
 
 
 # =====================================================
-# 10. 최근 14일 일평균 판매량
+# 12. 최근 14일 일평균 판매량
 # =====================================================
 
 def calculate_14day_average():
@@ -1822,7 +1904,7 @@ def calculate_14day_average():
 
             rows=10000,
 
-            cols=10,
+            cols=len(SPEED_HEADER),
         )
 
     records = sales_ws.get_all_values()
@@ -1836,6 +1918,27 @@ def calculate_14day_average():
         return
 
     header = records[0]
+
+    required = [
+
+        "날짜",
+        "매장",
+        "바코드",
+        "상품명",
+        "옵션명",
+        "판매수량",
+    ]
+
+    for field in required:
+
+        if field not in header:
+
+            print(
+                f"⚠️ 매출데이터에 "
+                f"{field} 헤더가 없습니다."
+            )
+
+            return
 
     date_idx = header.index(
         "날짜"
@@ -1864,6 +1967,7 @@ def calculate_14day_average():
     today = get_today()
 
     start_date = (
+
         today
         - timedelta(
             days=SALES_AVERAGE_DAYS - 1
@@ -1875,13 +1979,20 @@ def calculate_14day_average():
     for row in records[1:]:
 
         if len(row) <= max(
+
             date_idx,
+
             store_idx,
+
             barcode_idx,
+
             name_idx,
+
             option_idx,
-            qty_idx
+
+            qty_idx,
         ):
+
             continue
 
         date_text = row[
@@ -1891,8 +2002,11 @@ def calculate_14day_average():
         try:
 
             sale_date = datetime.strptime(
+
                 date_text,
+
                 "%Y-%m-%d"
+
             ).date()
 
         except ValueError:
@@ -1900,10 +2014,13 @@ def calculate_14day_average():
             continue
 
         if not (
+
             start_date
             <= sale_date
             <= today
+
         ):
+
             continue
 
         store = row[
@@ -1915,11 +2032,13 @@ def calculate_14day_average():
         ]
 
         if not store or not barcode:
+
             continue
 
         try:
 
             qty = int(
+
                 row[
                     qty_idx
                 ]
@@ -1958,38 +2077,25 @@ def calculate_14day_average():
                     0,
             }
 
+        # 판매 + / 반품 -
         summary[key][
             "total_qty"
         ] += qty
 
     output = [
-
-        [
-            "기준일",
-
-            "조회기간",
-
-            "매장",
-
-            "바코드",
-
-            "상품명",
-
-            "옵션명",
-
-            "14일 판매수량",
-
-            "일평균 판매수량",
-
-            "계산일수",
-        ]
+        SPEED_HEADER
     ]
 
     for item in sorted(
+
         summary.values(),
+
         key=lambda x: (
+
             x["store"],
+
             x["barcode"]
+
         )
     ):
 
@@ -1998,6 +2104,7 @@ def calculate_14day_average():
         )
 
         average = (
+
             total_qty
             / SALES_AVERAGE_DAYS
         )
@@ -2012,7 +2119,9 @@ def calculate_14day_average():
                 start_date.strftime(
                     "%Y-%m-%d"
                 )
+
                 + " ~ "
+
                 + today.strftime(
                     "%Y-%m-%d"
                 )
@@ -2039,7 +2148,9 @@ def calculate_14day_average():
     ws.clear()
 
     ws.update(
+
         range_name="A1",
+
         values=output,
     )
 
@@ -2055,7 +2166,93 @@ def calculate_14day_average():
 
 
 # =====================================================
-# 11. 메인
+# 13. 매출 요약 출력
+# =====================================================
+
+def print_sales_summary(
+    sales_data
+):
+
+    if not sales_data:
+
+        return
+
+    sale_count = 0
+
+    return_count = 0
+
+    sale_qty = 0
+
+    return_qty = 0
+
+    for sale in sales_data:
+
+        qty = int(
+            sale.get(
+                "qty",
+                0
+            )
+            or 0
+        )
+
+        if sale.get(
+            "type"
+        ) == "반품":
+
+            return_count += 1
+
+            return_qty += abs(
+                qty
+            )
+
+        else:
+
+            sale_count += 1
+
+            sale_qty += abs(
+                qty
+            )
+
+    print(
+        "----------------------------------------"
+    )
+
+    print(
+        "📊 이번 실행 매출 요약"
+    )
+
+    print(
+        f"  판매 건수: "
+        f"{sale_count:,}건"
+    )
+
+    print(
+        f"  판매 수량: "
+        f"{sale_qty:,}개"
+    )
+
+    print(
+        f"  반품 건수: "
+        f"{return_count:,}건"
+    )
+
+    print(
+        f"  반품 수량: "
+        f"{return_qty:,}개"
+    )
+
+    print(
+        f"  순판매수량: "
+        f"{sale_qty - return_qty:,}개"
+    )
+
+    print(
+        "----------------------------------------"
+    )
+
+
+# =====================================================
+# 14. 메인
 # =====================================================
 
 def main():
@@ -2076,6 +2273,11 @@ def main():
     print(
         f"🔧 셀메이트 JS 버전: "
         f"{SELLMATE_JS_VERSION}"
+    )
+
+    print(
+        f"📅 매출 시작일: "
+        f"{SALES_START_DATE}"
     )
 
     print(
@@ -2103,7 +2305,9 @@ def main():
         # =================================================
 
         stock_data = get_all_stock(
+
             session,
+
             store_list
         )
 
@@ -2155,6 +2359,10 @@ def main():
 
                 existing_keys = set()
 
+            # -------------------------------------------------
+            # 매출 조회
+            # -------------------------------------------------
+
             sales_data = get_sales(
 
                 session,
@@ -2162,9 +2370,21 @@ def main():
                 existing_keys
             )
 
+            print_sales_summary(
+                sales_data
+            )
+
+            # -------------------------------------------------
+            # 매출 저장
+            # -------------------------------------------------
+
             save_sales_to_sheets(
                 sales_data
             )
+
+            # -------------------------------------------------
+            # 최근 14일 판매속도
+            # -------------------------------------------------
 
             calculate_14day_average()
 
@@ -2217,5 +2437,5 @@ def main():
 # =====================================================
 
 if __name__ == "__main__":
-    main()
 
+    main()
