@@ -2426,8 +2426,8 @@ def save_sales_to_sheets(
         )
 
         ws.update(
-            f"A{current_start}:J{current_end}",
-            chunk
+        range_name=f"A{row_number}:E{row_number}",
+        values=values
         )
 
         print(
