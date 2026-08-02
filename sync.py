@@ -3021,43 +3021,23 @@ def main():
         "🚀 헤트라스 셀메이트 동기화 시작"
     )
 
-    print(
 
-        f"🕐 "
+    try:
 
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
-    print(
-
-        f"🔧 셀메이트 JS 버전: "
-        f"{SELLMATE_JS_VERSION}"
-    )
-
-    print(
-        "========================================"
-    )
         # =================================================
         # 로그인
         # =================================================
 
-        try:
+        if check_daily_sync():
 
-            if check_daily_sync():
+            print(
+                "오늘 작업은 이미 완료되었습니다."
+            )
 
-                print(
-                    "오늘 작업은 이미 완료되었습니다."
-                )
-
-                return
+            return
 
 
-            session = login()
-
-
-        except Exception as e:
-
-            raise e
+        session = login()
 
 
         # =================================================
