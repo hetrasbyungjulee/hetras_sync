@@ -2,11 +2,16 @@ name: 셀메이트 자동 동기화
 
 on:
   schedule:
-    # 한국시간(KST) 새벽 06:00
-    # GitHub Actions는 UTC 기준
-    # KST - 9시간 = UTC 21:00 (전날)
+    # 한국시간 오전 6시
+    # UTC 기준 전날 21시
     - cron: '0 21 * * *'
 
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '강제 실행 여부'
+        required: false
+        default: 'false'
   workflow_dispatch:
 
 jobs:
