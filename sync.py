@@ -2547,6 +2547,24 @@ def save_sales_to_sheets(
         )
 
         return
+    # -----------------------------------------
+    # 시트 행 자동 확장
+    # -----------------------------------------
+
+    required_rows = len(existing) + len(rows) + 10
+
+    if ws.row_count < required_rows:
+
+        new_size = required_rows + 5000
+
+        print(
+            f"  📈 시트 행 확장 "
+            f"{ws.row_count:,} → {new_size:,}"
+        )
+
+        ws.resize(
+            rows=new_size
+        )
 
 
     print(
@@ -2554,68 +2572,49 @@ def save_sales_to_sheets(
         f"매출/반품: "
         f"{len(rows):,}건"
     )
-# -----------------------------------------
-# 시트 행 자동 확장
-# -----------------------------------------
 
-required_rows = len(existing) + len(rows) + 10
 
-if ws.row_count < required_rows:
+    # -----------------------------------------
+    # 데이터 저장
+    # -----------------------------------------
 
-    new_size = required_rows + 5000
+    start_row = len(existing) + 1
+
+
+    for i in range(
+        0,
+        len(rows),
+        SHEET_CHUNK_SIZE
+    ):
+
+        chunk = rows[
+            i:i + SHEET_CHUNK_SIZE
+        ]
+
+        current_start = start_row + i
+
+        current_end = (
+            current_start
+            + len(chunk)
+            - 1
+        )
+
+        ws.update(
+            range_name=f"A{current_start}:J{current_end}",
+            values=chunk
+        )
+
+        print(
+            f"  ✅ 매출 "
+            f"{current_start:,}~"
+            f"{current_end:,}행 저장"
+        )
+
 
     print(
-        f"  📈 시트 행 확장 "
-        f"{ws.row_count:,} → {new_size:,}"
+        f"🎉 신규 매출/반품 "
+        f"{len(rows):,}건 저장 완료"
     )
-
-    ws.resize(
-        rows=new_size
-    )
-
-
-# -----------------------------------------
-# 데이터 저장
-# -----------------------------------------
-
-start_row = len(existing) + 1
-
-
-for i in range(
-    0,
-    len(rows),
-    SHEET_CHUNK_SIZE
-):
-
-    chunk = rows[
-        i:i + SHEET_CHUNK_SIZE
-    ]
-
-    current_start = start_row + i
-
-    current_end = (
-        current_start
-        + len(chunk)
-        - 1
-    )
-
-    ws.update(
-        range_name=f"A{current_start}:J{current_end}",
-        values=chunk
-    )
-
-    print(
-        f"  ✅ 매출 "
-        f"{current_start:,}~"
-        f"{current_end:,}행 저장"
-    )
-
-
-print(
-    f"🎉 신규 매출/반품 "
-    f"{len(rows):,}건 저장 완료"
-)
-
 # =====================================================
 # 최근 14일 판매속도
 # =====================================================
