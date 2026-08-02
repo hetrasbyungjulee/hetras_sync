@@ -2558,7 +2558,7 @@ def save_sales_to_sheets(
 # 시트 행 자동 확장
 # -----------------------------------------
 
-required_rows = len(existing) + len(rows)
+required_rows = len(existing) + len(rows) + 10
 
 if ws.row_count < required_rows:
 
@@ -2573,47 +2573,48 @@ if ws.row_count < required_rows:
         rows=new_size
     )
 
-    
-    start_row = (
-        len(existing) + 1
+
+# -----------------------------------------
+# 데이터 저장
+# -----------------------------------------
+
+start_row = len(existing) + 1
+
+
+for i in range(
+    0,
+    len(rows),
+    SHEET_CHUNK_SIZE
+):
+
+    chunk = rows[
+        i:i + SHEET_CHUNK_SIZE
+    ]
+
+    current_start = start_row + i
+
+    current_end = (
+        current_start
+        + len(chunk)
+        - 1
     )
 
-    for i in range(
-        0,
-        len(rows),
-        SHEET_CHUNK_SIZE
-    ):
-
-        chunk = rows[
-            i:i + SHEET_CHUNK_SIZE
-        ]
-
-        current_start = (
-            start_row + i
-        )
-
-        current_end = (
-            current_start
-            + len(chunk)
-            - 1
-        )
-
-        ws.update(
-            range_name=f"A{current_start}:J{current_end}",
-            values=chunk
-        )
-
-        print(
-            f"  ✅ 매출 "
-            f"{current_start:,}~"
-            f"{current_end:,}행 저장"
-        )
+    ws.update(
+        range_name=f"A{current_start}:J{current_end}",
+        values=chunk
+    )
 
     print(
-        f"🎉 신규 매출/반품 "
-        f"{len(rows):,}건 저장 완료"
+        f"  ✅ 매출 "
+        f"{current_start:,}~"
+        f"{current_end:,}행 저장"
     )
 
+
+print(
+    f"🎉 신규 매출/반품 "
+    f"{len(rows):,}건 저장 완료"
+)
 
 # =====================================================
 # 최근 14일 판매속도
