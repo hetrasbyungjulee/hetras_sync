@@ -1,24 +1,35 @@
-
 name: 셀메이트 자동 동기화
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 매시간 자동 실행 (한국시간 기준 +9)
-  workflow_dispatch:       # 수동 실행 버튼
+    # 한국시간(KST) 새벽 06:00
+    # GitHub Actions는 UTC 기준
+    # KST - 9시간 = UTC 21:00 (전날)
+    - cron: '0 21 * * *'
+
+  workflow_dispatch:
 
 jobs:
   sync:
+
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+
+      - name: 코드 가져오기
+        uses: actions/checkout@v4
+
 
       - name: Python 설정
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+
       - name: 패키지 설치
-        run: pip install requests gspread google-auth
+        run: |
+          pip install requests gspread google-auth
+
 
       - name: 셀메이트 동기화 실행
         env:
@@ -27,4 +38,5 @@ jobs:
           SELLMATE_DOMAIN: ${{ secrets.SELLMATE_DOMAIN }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+
         run: python sync.py
