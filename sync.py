@@ -1652,8 +1652,8 @@ def save_sales_sync_state(
     else:
 
         ws.update(
-            f"A{target_row}:E{target_row}",
-            values
+        range_name=f"A{target_row}:E{target_row}",
+        values=values
         )
 
 
@@ -2552,9 +2552,9 @@ def save_sales_to_sheets(
             - 1
         )
 
-        ws.update(
-            f"A{current_start}:J{current_end}",
-            chunk
+            ws.update(
+            range_name=f"A{current_start}:J{current_end}",
+            values=chunk
         )
 
         print(
