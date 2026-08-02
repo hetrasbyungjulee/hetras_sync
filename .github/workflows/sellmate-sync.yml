@@ -43,5 +43,6 @@ jobs:
           SELLMATE_DOMAIN: ${{ secrets.SELLMATE_DOMAIN }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          FORCE_SYNC: ${{ github.event.inputs.force }}
 
         run: python sync.py
