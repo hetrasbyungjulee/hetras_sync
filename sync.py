@@ -1,4 +1,4 @@
-import os
+    import os
 import json
 import urllib.parse
 import time
@@ -61,7 +61,134 @@ SALES_AVERAGE_DAYS = 14
 API_RETRY_COUNT = 3
 
 SHEET_CHUNK_SIZE = 5000
+# =====================================================
+# 하루 1회 동기화 체크
+# =====================================================
 
+SYNC_LOG_SHEET = "동기화로그"
+
+
+FORCE_SYNC = os.environ.get(
+    "FORCE_SYNC",
+    "false"
+).lower() == "true"
+
+
+
+def check_daily_sync():
+
+    # 수동 강제 실행이면 통과
+    if FORCE_SYNC:
+
+        print(
+            "⚡ 강제 실행 모드"
+        )
+
+        return False
+
+
+    gc = get_google_client()
+
+    sh = gc.open_by_key(
+        SPREADSHEET_ID
+    )
+
+
+    try:
+
+        ws = sh.worksheet(
+            SYNC_LOG_SHEET
+        )
+
+
+    except gspread.WorksheetNotFound:
+
+
+        ws = sh.add_worksheet(
+
+            title=SYNC_LOG_SHEET,
+
+            rows=100,
+
+            cols=5
+        )
+
+
+        ws.append_row(
+            [
+                "날짜",
+                "재고",
+                "매출",
+                "완료시간"
+            ]
+        )
+
+
+        return False
+
+
+
+    records = ws.get_all_values()
+
+
+    today = get_today().strftime(
+        "%Y-%m-%d"
+    )
+
+
+    for row in records[1:]:
+
+
+        if row and row[0] == today:
+
+
+            print(
+                "⏭️ 오늘 이미 동기화 완료"
+            )
+
+
+            return True
+
+
+
+    return False
+
+
+
+def save_daily_sync():
+
+
+    gc = get_google_client()
+
+    sh = gc.open_by_key(
+        SPREADSHEET_ID
+    )
+
+
+    ws = sh.worksheet(
+        SYNC_LOG_SHEET
+    )
+
+
+    ws.append_row(
+
+        [
+
+            get_today().strftime(
+                "%Y-%m-%d"
+            ),
+
+            "완료",
+
+            "완료",
+
+            datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+        ]
+
+    )
 
 # =====================================================
 # 공통
@@ -2917,7 +3044,16 @@ def main():
         # 로그인
         # =================================================
 
-        session = login()
+        if check_daily_sync():
+
+            print(
+            "오늘 작업은 이미 완료되었습니다."
+            )
+
+        return
+
+
+    session = login()
 
         # =================================================
         # 매장
@@ -3043,7 +3179,11 @@ def main():
         )
 
         print(
+        save_daily_sync()
+
+        print(
             "🎉 동기화 완료!"
+        )
         )
 
         print(
