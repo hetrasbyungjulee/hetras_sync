@@ -2552,7 +2552,7 @@ def save_sales_to_sheets(
             - 1
         )
 
-            ws.update(
+        ws.update(
             range_name=f"A{current_start}:J{current_end}",
             values=chunk
         )
