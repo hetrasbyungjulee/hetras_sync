@@ -2337,15 +2337,17 @@ def save_sales_to_sheets(
         "판매구분",
     ]
 
-        existing = ws.get_all_values()
+    existing = ws.get_all_values()
 
-            print("=" * 50)
-            print(f"기존 읽은 행수 : {len(existing):,}")
+    print("=" * 50)
+    print(f"기존 읽은 행수 : {len(existing):,}")
 
-        if existing:
-            print(f"헤더 : {existing[0]}")
+    if existing:
+        print(f"헤더 : {existing[0]}")
 
-            print("=" * 50)
+    print(existing[:5])
+
+    print("=" * 50)
 
     
     # -------------------------------------------------
@@ -2491,25 +2493,34 @@ def save_sales_to_sheets(
             str(row[2]).strip(),
             str(row[7]).strip(),
             str(row[8]).strip(),
-            str(row[9]).strip()
-            or "판매",
+            str(row[9]).strip() or "판매",
         )
 
-    existing_keys.add(key)
+        existing_keys.add(key)
 
-    print(f"기존 KEY 개수 : {len(existing_keys):,}")
 
-        )
+    print(
+        f"기존 KEY 개수 : {len(existing_keys):,}"
+    )
+
+
+    # -------------------------------------------------
+    # 신규 데이터 필터링
+    # -------------------------------------------------
 
     rows = []
 
+
+    for sale in sales_data:
 
         key = make_sale_key(
             sale
         )
 
+
         if key in existing_keys:
             continue
+
 
         rows.append([
             sale.get("date", ""),
@@ -2524,9 +2535,9 @@ def save_sales_to_sheets(
             sale.get("order_type", "판매"),
         ])
 
-        existing_keys.add(
-            key
-        )
+
+        existing_keys.add(key)
+
 
     if not rows:
 
@@ -2536,6 +2547,7 @@ def save_sales_to_sheets(
         )
 
         return
+
 
     print(
         f"  📦 신규 저장 "
