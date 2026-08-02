@@ -2282,6 +2282,11 @@ def get_sales(
         "========================================"
     )
 
+    
+    print("")
+    print(f"중복제거 전 : {len(all_sales):,}건")
+    print(f"KEY 개수 : {len(set(make_sale_key(x) for x in all_sales)):,}개")
+    
     return all_sales
 
 
@@ -2332,8 +2337,17 @@ def save_sales_to_sheets(
         "판매구분",
     ]
 
-    existing = ws.get_all_values()
+        existing = ws.get_all_values()
 
+            print("=" * 50)
+            print(f"기존 읽은 행수 : {len(existing):,}")
+
+        if existing:
+            print(f"헤더 : {existing[0]}")
+
+            print("=" * 50)
+
+    
     # -------------------------------------------------
     # 기존 데이터 보존
     #
@@ -2481,13 +2495,14 @@ def save_sales_to_sheets(
             or "판매",
         )
 
-        existing_keys.add(
-            key
+    existing_keys.add(key)
+
+    print(f"기존 KEY 개수 : {len(existing_keys):,}")
+
         )
 
     rows = []
 
-    for sale in sales_data:
 
         key = make_sale_key(
             sale
@@ -2527,7 +2542,26 @@ def save_sales_to_sheets(
         f"매출/반품: "
         f"{len(rows):,}건"
     )
+# -----------------------------------------
+# 시트 행 자동 확장
+# -----------------------------------------
 
+required_rows = len(existing) + len(rows)
+
+if ws.row_count < required_rows:
+
+    new_size = required_rows + 5000
+
+    print(
+        f"  📈 시트 행 확장 "
+        f"{ws.row_count:,} → {new_size:,}"
+    )
+
+    ws.resize(
+        rows=new_size
+    )
+
+    
     start_row = (
         len(existing) + 1
     )
