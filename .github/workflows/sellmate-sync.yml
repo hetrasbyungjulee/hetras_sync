@@ -12,7 +12,6 @@ on:
         description: '강제 실행 여부'
         required: false
         default: 'false'
-  workflow_dispatch:
 
 jobs:
   sync:
