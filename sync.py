@@ -3041,19 +3041,24 @@ def main():
         # 로그인
         # =================================================
 
-    
-    try:
-        
-        if check_daily_sync():
+        try:
 
-            print(
-                 "오늘 작업은 이미 완료되었습니다."
-            )
+            if check_daily_sync():
 
-        return
+                print(
+                    "오늘 작업은 이미 완료되었습니다."
+                )
+
+                return
 
 
-    session = login()
+            session = login()
+
+
+        except Exception as e:
+
+            raise e
+
 
         # =================================================
         # 매장
