@@ -52,7 +52,7 @@ SELLMATE_JS_VERSION = "2.8.4"
 PER_PAGE = 100
 
 SALES_START_DATE = datetime.strptime(
-    "2026-07-01",
+    "2026-08-01",
     "%Y-%m-%d"
 ).date()
 
