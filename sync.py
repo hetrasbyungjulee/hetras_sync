@@ -69,7 +69,8 @@ SALES_AVERAGE_DAYS = 7
 # 저장 단위
 SHEET_CHUNK_SIZE = 5000
 
-
+# API 재시도 횟수
+API_RETRY_COUNT = 3
 
 
 
