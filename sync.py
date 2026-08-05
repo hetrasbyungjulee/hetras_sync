@@ -2307,43 +2307,37 @@ def save_sales_to_sheets(
     )
 
 
-# -----------------------------------------
-# 데이터 저장 (append 방식)
-# -----------------------------------------
+    # -----------------------------------------
+    # 데이터 저장 (append 방식)
+    # -----------------------------------------
 
     print(
-    "  📥 Google Sheets append 저장 시작"
+        "  📥 Google Sheets append 저장 시작"
     )
 
 
-for i in range(
-    0,
-    len(rows),
-    SHEET_CHUNK_SIZE
-):
+    for i in range(
+        0,
+        len(rows),
+        SHEET_CHUNK_SIZE
+    ):
 
-    chunk = rows[
-        i:i + SHEET_CHUNK_SIZE
-    ]
+        chunk = rows[
+            i:i + SHEET_CHUNK_SIZE
+        ]
 
 
-    ws.append_rows(
-        chunk,
-        value_input_option="RAW"
-    )
+        ws.append_rows(
+            chunk,
+            value_input_option="RAW"
+        )
 
 
     print(
-        f"  ✅ 매출 "
-        f"{len(chunk):,}건 추가 저장"
+        f"🎉 신규 매출/반품 "
+        f"{len(rows):,}건 저장 완료"
     )
-
-
-print(
-    f"🎉 신규 매출/반품 "
-    f"{len(rows):,}건 저장 완료"
-)
-
+    
 # =====================================================
 # 최근 7일 판매속도
 # =====================================================
