@@ -2224,42 +2224,28 @@ def save_sales_to_sheets(
                 *migrated_rows
             ]
 
-    # -------------------------------------------------
-    # 기존 중복키
-    # -------------------------------------------------
+existing_keys = set()
 
-    existing_keys = set()
+for row in existing[1:]:
 
-    for row in existing[1:]:
+    if len(row) < 10:
+        continue
 
-        if len(row) < 10:
-            continue
-
-
-        key = "|".join([
-
-            str(row[0]).strip(),
-
-            str(row[1]).strip(),
-
-            str(row[2]).strip(),
-
-            str(row[6]).strip(),
-
-            str(row[7]).strip(),
-
-            str(row[8]).strip(),
-
-            str(row[9]).strip() or "판매",
-        )
-
-
-        existing_keys.add(key)
-
-    print(
-        f"기존 KEY 개수 : {len(existing_keys):,}"
+    key = (
+        str(row[0]).strip(),
+        str(row[1]).strip(),
+        str(row[2]).strip(),
+        str(row[7]).strip(),
+        str(row[8]).strip(),
+        str(row[9]).strip() or "판매",
     )
 
+    existing_keys.add(key)
+
+
+print(
+    f"기존 KEY 개수 : {len(existing_keys):,}"
+)
 
     # -------------------------------------------------
     # 신규 데이터 필터링
