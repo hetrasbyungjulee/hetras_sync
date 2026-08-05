@@ -1931,11 +1931,26 @@ def get_sales(
         )
 
 
-        page = 1
+        # =============================================
+        # 최초 시작 페이지 탐색
+        # 2600페이지 전체 조회 방지
+        # =============================================
+
+        first_orders, last_page = get_sales_page(
+            session,
+            1,
+            store_idx
+        )
+
+
+        page = find_sales_start_page(
+            session,
+            store_idx,
+            last_page
+        )
 
 
         while True:
-
 
             orders, last_page = get_sales_page(
                 session,
