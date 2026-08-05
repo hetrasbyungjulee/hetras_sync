@@ -55,12 +55,8 @@ PER_PAGE = 100
 # 수정 설정
 # =====================================================
 
-# 2026-08-01 이후 매출만 저장
-SALES_START_DATE = datetime.strptime(
-    "2026-08-01",
-    "%Y-%m-%d"
-).date()
-
+#전체 데이터 저장
+SALES_START_DATE = None
 
 # 최근 7일 판매속도
 SALES_AVERAGE_DAYS = 7
@@ -1049,9 +1045,8 @@ def convert_orders_to_sales(
         if not sale_date:
             continue
 
-        if sale_date < SALES_START_DATE:
+        if SALES_START_DATE and sale_date < SALES_START_DATE:
             continue
-
         order_type = str(
 
             order.get(
@@ -1942,12 +1937,7 @@ def get_sales(
             store_idx
         )
 
-
-        page = find_sales_start_page(
-            session,
-            store_idx,
-            last_page
-        )
+        page = 1
 
 
         while True:
@@ -2000,21 +1990,6 @@ def get_sales(
                 f"주문 {len(orders)}건 "
                 f"신규 {new_count}건"
             )
-
-
-            # 8월 이전이면 종료
-            oldest, newest = get_page_date_range(
-                orders
-            )
-
-
-            if oldest and oldest < SALES_START_DATE:
-
-                print(
-                    f"  🛑 {SALES_START_DATE} 이전 데이터 도달"
-                )
-
-                break
 
 
 
