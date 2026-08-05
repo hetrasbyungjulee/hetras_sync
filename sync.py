@@ -71,21 +71,6 @@ SHEET_CHUNK_SIZE = 5000
 
 
 
-# =====================================================
-# 판매 KEY
-# =====================================================
-
-def make_sale_key(sale):
-
-    return (
-        str(sale.get("store", "")).strip(),
-        str(sale.get("receipt", "")).strip(),
-        str(sale.get("barcode", "")).strip(),
-        str(sale.get("order_idx", "")).strip(),
-        str(sale.get("item_idx", "")).strip(),
-        str(sale.get("order_type", "판매")).strip(),
-    )
-
 
 
 # =====================================================
@@ -2241,7 +2226,8 @@ def save_sales_to_sheets(
             str(row[7]).strip(),
             str(row[8]).strip(),
             str(row[9]).strip()
-            or "판매",
+            if row[9]
+            else "판매",
         )
 
         existing_keys.add(key)
@@ -2250,7 +2236,7 @@ def save_sales_to_sheets(
     print(
         f"기존 KEY 개수 : {len(existing_keys):,}"
     )
-
+    
     # -------------------------------------------------
     # 신규 데이터 필터링
     # -------------------------------------------------
@@ -2325,9 +2311,9 @@ def save_sales_to_sheets(
 # 데이터 저장 (append 방식)
 # -----------------------------------------
 
-print(
+    print(
     "  📥 Google Sheets append 저장 시작"
-)
+    )
 
 
 for i in range(
