@@ -18,7 +18,7 @@ from google.oauth2.service_account import Credentials
 # 4. 전체 매장 2026-07-01 이후 매출 조회
 # 5. 판매 / 반품 구분
 # 6. 주문번호 + 상품순번 기준 중복 방지
-# 7. 최근 7일 판매속도 계산
+# 7. 최근 설정일수 판매속도 계산
 # =====================================================
 
 
@@ -52,7 +52,7 @@ EXTERNAL_BASE_URL = os.environ.get(
     BASE_URL,
 ).rstrip("/")
 
-SELLMATE_JS_VERSION = "2.8.4"
+SELLMATE_JS_VERSION = os.environ.get("SELLMATE_JS_VERSION", "2.8.4")
 
 PER_PAGE = 100
 
@@ -63,7 +63,7 @@ PER_PAGE = 100
 #전체 데이터 저장
 SALES_START_DATE = None
 
-# 최근 7일 판매속도
+# 최근 설정일수 판매속도
 SALES_AVERAGE_DAYS = 7
 
 
@@ -535,7 +535,10 @@ def get_all_stock(
     session,
     store_list
 ):
-
+    """
+    현재 재고 전체 조회.
+    재고 API가 412 등으로 실패해도 매출 동기화는 계속 진행한다.
+    """
     print("📦 재고 데이터 조회 중...")
 
     idx_to_store = {
@@ -545,24 +548,18 @@ def get_all_stock(
 
     all_stock = []
     page = 1
-    fallback_to_legacy = False
 
     while True:
-
-        last_error = None
         data = None
+        last_error = None
+
+        url = (
+            f"{EXTERNAL_BASE_URL}/external/"
+            f"{SELLMATE_DOMAIN}/stock"
+        )
 
         for attempt in range(1, API_RETRY_COUNT + 1):
-
             try:
-                if fallback_to_legacy:
-                    url = f"{BASE_URL}/product/variant/stock"
-                else:
-                    url = (
-                        f"{EXTERNAL_BASE_URL}/external/"
-                        f"{SELLMATE_DOMAIN}/stock"
-                    )
-
                 res = session.get(
                     url,
                     params={
@@ -577,43 +574,40 @@ def get_all_stock(
                     f"(page {page})"
                 )
 
-                # 외부 API 경로가 서버에서 지원되지 않는 경우
-                # 기존 /json 엔드포인트로 자동 fallback
-                if (
-                    not fallback_to_legacy
-                    and res.status_code in (404, 405)
-                ):
-                    print(
-                        "  ℹ️ External 재고 API 경로 미지원 → "
-                        "기존 재고 API로 전환"
-                    )
-                    fallback_to_legacy = True
-                    continue
-
                 if res.status_code == 200:
                     try:
                         data = res.json()
                     except Exception:
-                        raise Exception("재고 API JSON 파싱 실패")
+                        last_error = "재고 API JSON 파싱 실패"
                     break
 
                 last_error = (
                     f"{res.status_code} {res.text[:300]}"
                 )
 
-                # 412 등 일시적인 응답은 재시도
+                if res.status_code == 412:
+                    print(
+                        "  ⚠️ 재고 API 412 (Need JS Update) → "
+                        "이번 실행에서는 재고를 건너뜁니다."
+                    )
+                    return []
+
                 if attempt < API_RETRY_COUNT:
-                    time.sleep(attempt * 3)
+                    time.sleep(attempt * 2)
 
             except requests.RequestException as e:
                 last_error = str(e)
+                print(
+                    f"  ⚠️ 재고 API 요청 오류 "
+                    f"{attempt}/{API_RETRY_COUNT}: {e}"
+                )
                 if attempt < API_RETRY_COUNT:
-                    time.sleep(attempt * 3)
+                    time.sleep(attempt * 2)
 
         if data is None:
-            raise Exception(
-                f"재고 API 조회 실패 (page {page}): {last_error}"
-            )
+            print(f"  ⚠️ 재고 API 조회 실패: {last_error}")
+            print("  ℹ️ 재고 저장은 건너뛰고 매출 동기화를 계속합니다.")
+            return []
 
         if isinstance(data, list):
             items = data
@@ -631,7 +625,6 @@ def get_all_stock(
             break
 
         for item in items:
-
             if not isinstance(item, dict):
                 continue
 
@@ -675,7 +668,6 @@ def get_all_stock(
 
             stocks = item.get("stocks") or []
 
-            # External /stock 응답이 stock 단위 객체로 바로 오는 경우
             if not stocks and (
                 "qty" in item
                 or "stock" in item
@@ -684,7 +676,6 @@ def get_all_stock(
                 stocks = [item]
 
             for stock in stocks:
-
                 if not isinstance(stock, dict):
                     continue
 
@@ -697,10 +688,7 @@ def get_all_stock(
                     or warehouse_store.get("idx")
                 )
 
-                store_name = idx_to_store.get(
-                    store_idx,
-                    ""
-                )
+                store_name = idx_to_store.get(store_idx, "")
 
                 if not store_name:
                     store_name = norm(
@@ -744,10 +732,10 @@ def get_all_stock(
         page += 1
 
     if not all_stock:
-        raise Exception("재고 데이터를 가져오지 못했습니다.")
+        print("  ⚠️ 저장 가능한 재고 데이터가 없습니다.")
+        return []
 
     print(f"✅ 재고 총 {len(all_stock):,}건")
-
     return all_stock
 
 
@@ -1680,7 +1668,7 @@ def save_sales_to_sheets(sales_data):
     )
 
 # =====================================================
-# 최근 7일 판매속도
+# 최근 설정일수 판매속도
 # =====================================================
 
 def calculate_7day_average():
@@ -2163,27 +2151,30 @@ def main():
         # =================================================
 
         stock_data = get_all_stock(
-
             session,
-
             store_list
         )
 
-        save_stock_to_sheets(
-            stock_data
-        )
+        stock_success = False
 
-        print(
-            "========================================"
-        )
+        if stock_data:
+            try:
+                save_stock_to_sheets(stock_data)
+                stock_success = True
 
-        print(
-            "📦 재고 동기화 완료!"
-        )
+                print("========================================")
+                print("📦 재고 동기화 완료!")
+                print("========================================")
 
-        print(
-            "========================================"
-        )
+            except Exception as stock_save_error:
+                print(
+                    f"⚠️ 재고 Google Sheets 저장 실패: "
+                    f"{stock_save_error}"
+                )
+        else:
+            print("========================================")
+            print("⚠️ 재고 동기화 건너뜀 (매출 동기화는 계속 진행)")
+            print("========================================")
 
         sales_success = False
 
@@ -2277,16 +2268,20 @@ def main():
         )
 
 
-        if sales_success:
+        if sales_success and stock_success:
             save_daily_sync()
+            print("🎉 재고 + 매출 동기화 완료!")
+        elif sales_success:
             print(
-                "🎉 동기화 완료!"
+                "⚠️ 매출은 완료되었지만 재고가 실패하여 "
+                "오늘 완료 로그를 기록하지 않습니다."
             )
         else:
             print(
                 "⚠️ 매출 동기화가 완료되지 않아 "
                 "오늘 완료 로그를 기록하지 않습니다."
             )
+
 
 
         print(
