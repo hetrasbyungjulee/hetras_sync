@@ -1,6 +1,7 @@
 import os
 import json
 import urllib.parse
+import re
 import time
 import requests
 import gspread
@@ -46,13 +47,13 @@ GOOGLE_CREDS = json.loads(
 # =====================================================
 
 BASE_URL = "https://sellmatepos.com/json"
-WEB_API_BASE_URL = "https://sellmatepos.com/webApi"
-SELLMATE_SITE_URL = "https://sellmatepos.com"
 
-SELLMATE_JS_VERSION = os.environ.get(
-    "SELLMATE_JS_VERSION",
-    "2.8.4"
-)
+EXTERNAL_BASE_URL = os.environ.get(
+    "SELLMATE_EXTERNAL_BASE_URL",
+    BASE_URL,
+).rstrip("/")
+
+SELLMATE_JS_VERSION = os.environ.get("SELLMATE_JS_VERSION", "2.8.5")
 
 PER_PAGE = 100
 
@@ -72,6 +73,10 @@ SHEET_CHUNK_SIZE = 5000
 
 # API 재시도 횟수
 API_RETRY_COUNT = 3
+VERSION_RETRY_COUNT = 3
+CURSOR_SHEET = "매출동기화상태"
+CURSOR_HEADER = ["매장", "store_idx", "last_page", "last_page_saved_at", "status"]
+FULL_RESCAN = os.environ.get("FULL_RESCAN", "false").lower() == "true"
 
 
 
@@ -268,129 +273,50 @@ def get_google_client():
 
 
 # =====================================================
-# Sellmate 프론트엔드 버전 자동 탐색 / API 공통 처리
+# Sellmate JS 버전 자동 탐색
 # =====================================================
-
-
-def _version_tuple(value):
-    try:
-        parts = str(value).strip().split(".")
-        if len(parts) < 2:
-            return None
-        return tuple(int(x) for x in parts[:3])
-    except Exception:
-        return None
-
-
-def discover_sellmate_js_version(session, silent=False):
-    global SELLMATE_JS_VERSION
-
+def detect_js_version(session):
+    """Sellmate HTML/CSS에서 현재 JS/CSS 버전을 찾아 API 헤더에 적용."""
     candidates = []
     urls = [
-        f"{SELLMATE_SITE_URL}/product/variant/stock",
-        f"{SELLMATE_SITE_URL}/",
+        "https://sellmatepos.com/",
+        "https://sellmatepos.com/pos",
+        "https://sellmatepos.com/product/variant/stock",
     ]
-
-    import re
-
+    patterns = [
+        r'sellmate-pos-js-version[^0-9]{0,30}(2\.\d+\.\d+)',
+        r'sellmate-pos-js-version[\"\']?\s*[:=]\s*[\"\'](2\.\d+\.\d+)' ,
+        r'\?v=(2\.\d+\.\d+)',
+    ]
     for url in urls:
         try:
-            res = session.get(
-                url,
-                timeout=30,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                },
-            )
-            if res.status_code != 200:
+            r = session.get(url, timeout=20)
+            if r.status_code != 200:
                 continue
-
-            html = res.text or ""
-
-            patterns = [
-                r"(?:css|js)/[^\"']+\?[^\"']*?[?&]v=(\d+\.\d+(?:\.\d+)?)",
-                r"[?&]v=(\d+\.\d+(?:\.\d+)?)",
-                r"sellmate-pos-js-version[^0-9]*(\d+\.\d+(?:\.\d+)?)",
-            ]
-
-            for pattern in patterns:
-                candidates.extend(re.findall(pattern, html, flags=re.I))
-
-            if candidates:
-                break
-        except requests.RequestException:
+            text = r.text or ""
+            for pat in patterns:
+                for v in re.findall(pat, text, flags=re.I):
+                    if isinstance(v, tuple):
+                        v = next((x for x in v if x), "")
+                    if re.fullmatch(r"2\.\d+\.\d+", str(v)):
+                        candidates.append(str(v))
+        except Exception:
             continue
-
-    valid = []
-    for value in candidates:
-        vt = _version_tuple(value)
-        if vt and vt[0] in (2, 3, 4):
-            valid.append((vt, value))
-
-    if valid:
-        valid.sort(key=lambda x: x[0], reverse=True)
-        SELLMATE_JS_VERSION = valid[0][1]
-        if not silent:
-            print(f"  🔎 Sellmate 현재 JS 버전 자동 탐색: {SELLMATE_JS_VERSION}")
-    elif not silent:
-        print(f"  ⚠️ JS 버전 자동 탐색 실패 → fallback {SELLMATE_JS_VERSION}")
-
+    if candidates:
+        def verkey(v):
+            return tuple(int(x) for x in v.split("."))
+        version = max(set(candidates), key=verkey)
+        print(f"  🔎 Sellmate 현재 JS 버전 자동 탐색: {version}")
+        return version
+    print(f"  ℹ️ 버전 자동 탐색 실패 → 기존 버전 사용: {SELLMATE_JS_VERSION}")
     return SELLMATE_JS_VERSION
 
 
-def apply_sellmate_headers(session):
-    session.headers.update({
-        "sellmate-pos-js-version": SELLMATE_JS_VERSION,
-        "x-api-version": "2.2",
-        "x-pos-domain": SELLMATE_DOMAIN,
-        "pos-locale": "kr",
-    })
-
-
-def sellmate_get(session, path, params=None, label="API", timeout=60):
-    """/webApi 우선 → 404 시 /json fallback → 412 시 JS 버전 자동 재탐색."""
-    params = params or {}
-    last_error = None
-    bases = [WEB_API_BASE_URL, BASE_URL]
-
-    for attempt in range(1, API_RETRY_COUNT + 1):
-        refresh_needed = False
-
-        for base in bases:
-            url = f"{base}/{path.lstrip('/')}"
-            try:
-                res = session.get(url, params=params, timeout=timeout)
-                print(f"  📡 {label} 응답: {res.status_code}")
-
-                if res.status_code == 200:
-                    return res
-
-                if res.status_code == 412:
-                    last_error = f"412 {res.text[:500]}"
-                    print(f"  ⚠️ 412 Need JS Update ({attempt}/{API_RETRY_COUNT})")
-                    refresh_needed = True
-                    break
-
-                if res.status_code == 404:
-                    last_error = f"404 {res.text[:300]}"
-                    continue
-
-                last_error = f"{res.status_code} {res.text[:500]}"
-
-            except requests.RequestException as e:
-                last_error = str(e)
-                print(f"  ⚠️ {label} 요청 오류 ({attempt}/{API_RETRY_COUNT}): {e}")
-
-        if refresh_needed:
-            old_version = SELLMATE_JS_VERSION
-            discover_sellmate_js_version(session, silent=False)
-            apply_sellmate_headers(session)
-            print(f"  🔄 JS 버전 재적용: {old_version} → {SELLMATE_JS_VERSION}")
-
-        if attempt < API_RETRY_COUNT:
-            time.sleep(attempt * 2)
-
-    raise Exception(f"{label} 조회 실패: {last_error}")
+def apply_js_version(session, version):
+    global SELLMATE_JS_VERSION
+    SELLMATE_JS_VERSION = version
+    session.headers.update({"sellmate-pos-js-version": version})
+    print(f"  🔄 JS 버전 적용: {version}")
 
 
 # =====================================================
@@ -402,8 +328,6 @@ def login():
     print("🔐 셀메이트 로그인 중...")
 
     session = requests.Session()
-
-    discover_sellmate_js_version(session, silent=False)
 
     session.headers.update({
 
@@ -528,13 +452,19 @@ def login():
 
         "origin_useridx":
             "9",
+
+        "pos-locale":
+            "kr",
+
+        "sellmate-pos-js-version":
+            SELLMATE_JS_VERSION,
+
+        "x-api-version":
+            "2.2",
+
+        "x-pos-domain":
+            SELLMATE_DOMAIN,
     })
-
-    apply_sellmate_headers(session)
-
-    # 인증된 실제 화면에서도 한 번 더 확인
-    discover_sellmate_js_version(session, silent=False)
-    apply_sellmate_headers(session)
 
     print(
         f"✅ 로그인 성공 "
@@ -660,92 +590,190 @@ def get_all_stock(
 
     print("📦 재고 데이터 조회 중...")
 
-    idx_to_store = {value: key for key, value in store_list.items()}
+    idx_to_store = {
+        value: key
+        for key, value in store_list.items()
+    }
+
     all_stock = []
     page = 1
+    fallback_to_legacy = False
 
     while True:
-        try:
-            res = sellmate_get(
-                session,
-                "product/variant/stock",
-                params={"page": page, "perPage": 15},
-                label=f"재고 API page={page}",
-                timeout=60,
-            )
-        except Exception as e:
-            raise Exception(f"재고 API 조회 실패 (page {page}): {e}")
 
-        try:
-            data = res.json()
-        except Exception:
-            raise Exception(f"재고 API JSON 파싱 실패 (page {page})")
+        last_error = None
+        data = None
+
+        for attempt in range(1, API_RETRY_COUNT + 1):
+
+            try:
+                if fallback_to_legacy:
+                    url = f"{BASE_URL}/product/variant/stock"
+                else:
+                    url = (
+                        f"{EXTERNAL_BASE_URL}/external/"
+                        f"{SELLMATE_DOMAIN}/stock"
+                    )
+
+                res = session.get(
+                    url,
+                    params={
+                        "page": page,
+                        "perPage": PER_PAGE,
+                    },
+                    timeout=60,
+                )
+
+                print(
+                    f"  재고 API 응답: {res.status_code} "
+                    f"(page {page})"
+                )
+
+                # 외부 API 경로가 서버에서 지원되지 않는 경우
+                # 기존 /json 엔드포인트로 자동 fallback
+                if (
+                    not fallback_to_legacy
+                    and res.status_code in (404, 405)
+                ):
+                    print(
+                        "  ℹ️ External 재고 API 경로 미지원 → "
+                        "기존 재고 API로 전환"
+                    )
+                    fallback_to_legacy = True
+                    continue
+
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                    except Exception:
+                        raise Exception("재고 API JSON 파싱 실패")
+                    break
+
+                last_error = (
+                    f"{res.status_code} {res.text[:300]}"
+                )
+
+                # 412 등 일시적인 응답은 재시도
+                if attempt < API_RETRY_COUNT:
+                    time.sleep(attempt * 3)
+
+            except requests.RequestException as e:
+                last_error = str(e)
+                if attempt < API_RETRY_COUNT:
+                    time.sleep(attempt * 3)
+
+        if data is None:
+            raise Exception(
+                f"재고 API 조회 실패 (page {page}): {last_error}"
+            )
 
         if isinstance(data, list):
-            items, last_page = data, 1
+            items = data
+            last_page = 1
         else:
-            items = data.get("data", [])
+            items = data.get("data", []) or []
             meta = data.get("meta", {}) or {}
-            last_page = data.get("last_page") or meta.get("last_page") or 1
+            last_page = (
+                data.get("last_page")
+                or meta.get("last_page")
+                or 1
+            )
 
         if not items:
             break
 
         for item in items:
+
             if not isinstance(item, dict):
                 continue
 
             barcode_data = item.get("barcode") or {}
+            variant = item.get("variant") or {}
+            variant_barcode = variant.get("barcode") or {}
+
             barcode = str(
                 barcode_data.get("code1", "")
+                or barcode_data.get("code", "")
                 or item.get("code1", "")
+                or variant_barcode.get("code", "")
+                or variant_barcode.get("code1", "")
                 or ""
             ).strip()
+
             if not barcode:
                 continue
 
             product = item.get("product") or {}
             product_class = item.get("product_class") or {}
+            variant_product = variant.get("productClass") or {}
+
             product_name = (
-                product.get("name", "")
+                item.get("product_name", "")
+                or item.get("name", "")
+                or product.get("name", "")
                 or product_class.get("name", "")
+                or variant_product.get("name", "")
                 or item.get("original_name", "")
                 or ""
             )
+
             option_name = (
-                item.get("origin_option_name", "")
+                item.get("variant_option_name", "")
+                or item.get("origin_option_name", "")
                 or item.get("option_name", "")
+                or item.get("option", "")
                 or ""
             )
 
             stocks = item.get("stocks") or []
-            if not stocks and any(k in item for k in ("stock", "total_stock", "store_idx")):
+
+            # External /stock 응답이 stock 단위 객체로 바로 오는 경우
+            if not stocks and (
+                "qty" in item
+                or "stock" in item
+                or "warehouse" in item
+            ):
                 stocks = [item]
 
             for stock in stocks:
+
                 if not isinstance(stock, dict):
                     continue
 
                 warehouse = stock.get("warehouse") or {}
-                store_idx = stock.get("store_idx") or warehouse.get("store_idx")
-                store_name = idx_to_store.get(store_idx, "")
+                warehouse_store = warehouse.get("store") or {}
+
+                store_idx = (
+                    stock.get("store_idx")
+                    or warehouse.get("store_idx")
+                    or warehouse_store.get("idx")
+                )
+
+                store_name = idx_to_store.get(
+                    store_idx,
+                    ""
+                )
 
                 if not store_name:
-                    warehouse_store = warehouse.get("store") or {}
                     store_name = norm(
                         stock.get("store_name", "")
                         or warehouse_store.get("name", "")
+                        or item.get("store_name", "")
+                        or item.get("store", "")
                         or ""
                     )
 
-                if not store_name or store_name == "ALL":
+                if not store_name:
                     continue
 
-                qty = stock.get("stock")
-                if qty is None:
-                    qty = stock.get("total_stock")
                 try:
-                    qty = int(qty or 0)
+                    qty = int(
+                        stock.get("stock", 0)
+                        or stock.get("qty", 0)
+                        or item.get("stock", 0)
+                        or item.get("qty", 0)
+                        or 0
+                    )
                 except (ValueError, TypeError):
                     qty = 0
 
@@ -757,16 +785,21 @@ def get_all_stock(
                     "stock": qty,
                 })
 
-        print(f"  📄 재고 page {page}/{last_page} ({len(all_stock):,}건)")
+        print(
+            f"  재고 page {page}/{last_page} "
+            f"({len(all_stock)}건)"
+        )
 
         if page >= int(last_page):
             break
+
         page += 1
 
     if not all_stock:
-        raise Exception("저장 가능한 재고 데이터가 없습니다.")
+        raise Exception("재고 데이터를 가져오지 못했습니다.")
 
     print(f"✅ 재고 총 {len(all_stock):,}건")
+
     return all_stock
 
 
@@ -928,6 +961,34 @@ def save_stock_to_sheets(stock_data):
 # 주문 날짜
 # =====================================================
 
+def get_order_date(order):
+
+    datetime_text = str(
+
+        order.get(
+            "datetime",
+            ""
+        )
+        or ""
+    )
+
+    if not datetime_text:
+        return None
+
+    try:
+
+        return datetime.strptime(
+
+            datetime_text[:10],
+
+            "%Y-%m-%d"
+        ).date()
+
+    except ValueError:
+
+        return None
+
+
 # =====================================================
 # 주문 → 판매 / 반품
 # =====================================================
@@ -985,15 +1046,16 @@ def convert_orders_to_sales(
             or "취소" in order_type
         )
 
+        order_store = order.get("store") or {}
+        if not isinstance(order_store, dict):
+            order_store = {}
+
         store_name = norm(
-
-            order.get(
-                "store_name",
-                ""
-            )
-
+            order.get("store_name", "")
+            or order.get("storeName", "")
+            or order_store.get("name", "")
+            or order_store.get("store_name", "")
             or forced_store_name
-
             or ""
         )
 
@@ -1197,1018 +1259,187 @@ def convert_orders_to_sales(
 
 
 # =====================================================
-# 매출 API
-#
-# 핵심:
-# store_idx를 명시해서 매장별로 조회
+# 매출 API + 자동 재탐색 + 매장별 커서
 # =====================================================
+def get_sales_page(session, page, store_idx=None, start_date=None, end_date=None):
+    params = {"page": page, "perPage": PER_PAGE}
+    if store_idx is not None:
+        params["store_idx"] = store_idx
+    if start_date:
+        params["startDate"] = start_date.strftime("%Y-%m-%d") if hasattr(start_date, "strftime") else str(start_date)
+    if end_date:
+        params["endDate"] = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else str(end_date)
 
-def get_sales_page(
-    session,
-    page,
-    store_idx
-):
-
-    params = {
-        "page": page,
-        "perPage": PER_PAGE,
-        "store_idx": store_idx,
-    }
-
-    res = sellmate_get(
-        session,
-        "order",
-        params=params,
-        label=f"매출 API store_idx={store_idx} page={page}",
-        timeout=90,
-    )
-
-    try:
-        data = res.json()
-    except Exception:
-        raise Exception("매출 API JSON 파싱 실패")
-
-    if isinstance(data, list):
-        return data, 1
-
-    orders = data.get("data", [])
-    meta = data.get("meta", {}) or {}
-    last_page = data.get("last_page") or meta.get("last_page") or 1
-    return orders, int(last_page)
-
-
-# =====================================================
-# 매출 기존 데이터 확인
-# =====================================================
-
-
-def get_existing_sales_state(ws):
-
-    print(
-        "🔎 기존 매출 데이터 확인 중..."
-    )
-
-    records = ws.get_all_values()
-
-    if not records:
-        print("  기존 매출 데이터: 0건")
-        return set()
-
-    header = records[0]
-
-    # 새 구조의 필수 컬럼
-    required = [
-        "날짜",
-        "매장",
-        "바코드",
-        "판매수량",
-        "영수증번호",
-        "주문번호",
-        "상품순번",
-    ]
-
-    missing = [
-        field
-        for field in required
-        if field not in header
-    ]
-
-    if missing:
-        print(
-            "  ⚠️ 기존 매출 시트에서 "
-            f"필수 헤더 누락: {missing}"
-        )
-        return set()
-
-    indexes = {
-        field: header.index(field)
-        for field in required
-    }
-
-    # 판매구분이 없던 구버전 데이터는
-    # 기존 행을 삭제하지 않고 '판매'로 간주한다.
-    type_idx = (
-        header.index("판매구분")
-        if "판매구분" in header
-        else None
-    )
-
-    existing_keys = set()
-
-    for row in records[1:]:
-
+    last_error = ""
+    for attempt in range(1, API_RETRY_COUNT + 1):
         try:
-            key = (
-                str(row[indexes["날짜"]]).strip(),
-                str(row[indexes["매장"]]).strip(),
-                str(row[indexes["바코드"]]).strip(),
-                str(row[indexes["주문번호"]]).strip(),
-                str(row[indexes["상품순번"]]).strip(),
-                (
-                    str(row[type_idx]).strip()
-                    if type_idx is not None
-                    and type_idx < len(row)
-                    and row[type_idx]
-                    else "판매"
-                ),
-            )
+            res = session.get(f"{BASE_URL}/order", params=params, timeout=90)
+            print(f"  📡 매출 API store_idx={store_idx} page={page} 응답: {res.status_code}")
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list):
+                    return data, 1
+                orders = data.get("data", []) or []
+                meta = data.get("meta", {}) or {}
+                last_page = int(data.get("last_page") or meta.get("last_page") or 1)
+                return orders, last_page
 
-            existing_keys.add(key)
+            last_error = f"{res.status_code} {res.text[:300]}"
 
-        except (IndexError, KeyError):
-            continue
+            if res.status_code == 412:
+                print(f"  ⚠️ 412 Need JS Update ({attempt}/{API_RETRY_COUNT})")
+                version = detect_js_version(session)
+                apply_js_version(session, version)
+                time.sleep(1)
+                continue
 
-    print(
-        f"  기존 매출 데이터: "
-        f"{len(existing_keys):,}건"
-    )
+            if res.status_code == 404:
+                # 간헐적인 404는 바로 다음 재시도로 복구되는 경우가 있어 짧게 재시도
+                if attempt < API_RETRY_COUNT:
+                    time.sleep(1 + attempt)
+                    continue
 
-    return existing_keys
+            if attempt < API_RETRY_COUNT:
+                time.sleep(attempt * 2)
+        except requests.RequestException as e:
+            last_error = str(e)
+            if attempt < API_RETRY_COUNT:
+                time.sleep(attempt * 2)
+        except Exception as e:
+            last_error = str(e)
+            if attempt < API_RETRY_COUNT:
+                time.sleep(attempt * 2)
 
-
-
-# =====================================================
-# 매출 동기화 상태
-#
-# 매번 2,600페이지 이상을 다시 조회하지 않기 위해
-# 매장별 마지막 매출 페이지를 Google Sheets에 기록한다.
-# =====================================================
-
-SALES_STATE_SHEET = "매출동기화상태"
-
-# 첫 실행에서 최근 영역을 찾기 위한 기본 탐색 범위
-INITIAL_LOOKBACK_PAGES = 320
-
-# 최초 시작점을 찾지 못하면 뒤로 확장
-INITIAL_EXPAND_STEP = 150
-
-# 다음 실행에서는 이전 커서보다 약간 앞에서 시작
-SALES_CURSOR_LOOKBACK = 15
-
-# API의 비정상적인 페이지 구간 때문에
-# 오래된 페이지가 연속으로 나와도 이 정도는 확인한다.
-SALES_STALE_PAGE_LIMIT = 35
-
-# 초기 데이터가 아직 충분히 쌓이지 않은 경우에는 저장 상태가 있더라도
-# 1페이지부터 전체 백필하여 누락된 과거 매출을 채웁니다.
-BACKFILL_EXISTING_KEY_THRESHOLD = 1000
+    raise Exception(f"매출 API store_idx={store_idx} page={page} 조회 실패: {last_error}")
 
 
-def get_sales_state_sheet():
-
+def prepare_cursor_sheet():
     gc = get_google_client()
-
-    sh = gc.open_by_key(
-        SPREADSHEET_ID
-    )
-
+    sh = gc.open_by_key(SPREADSHEET_ID)
     try:
-        ws = sh.worksheet(
-            SALES_STATE_SHEET
-        )
-
+        ws = sh.worksheet(CURSOR_SHEET)
     except gspread.WorksheetNotFound:
-
-        ws = sh.add_worksheet(
-            title=SALES_STATE_SHEET,
-            rows=100,
-            cols=5
-        )
-
-        ws.update(
-            "A1:E1",
-            [[
-                "매장",
-                "store_idx",
-                "마지막페이지",
-                "마지막확인일",
-                "업데이트시간",
-            ]]
-        )
-
+        ws = sh.add_worksheet(title=CURSOR_SHEET, rows=100, cols=5)
+        ws.update(range_name="A1:E1", values=[CURSOR_HEADER])
     return ws
 
 
-def load_sales_sync_state():
-
-    ws = get_sales_state_sheet()
-
-    records = ws.get_all_values()
-
-    state = {}
-
-    for row in records[1:]:
-
-        if len(row) < 3:
-            continue
-
-        store = str(
-            row[0]
-        ).strip()
-
-        if not store:
-            continue
-
-        try:
-            store_idx = int(
-                row[1]
-            )
-        except (ValueError, TypeError):
-            store_idx = 0
-
-        try:
-            last_page = int(
-                row[2]
-            )
-        except (ValueError, TypeError):
-            last_page = 0
-
-        state[store] = {
-            "store_idx": store_idx,
-            "last_page": last_page,
-            "last_date": (
-                row[3].strip()
-                if len(row) > 3
-                else ""
-            ),
-        }
-
-    return ws, state
-
-
-def save_sales_sync_state(
-    ws,
-    store_name,
-    store_idx,
-    last_page,
-    last_date
-):
-
-    records = ws.get_all_values()
-
-    target_row = None
-
-    for row_number, row in enumerate(
-        records[1:],
-        start=2
-    ):
-
-        if (
-            row
-            and str(row[0]).strip()
-            == str(store_name).strip()
-        ):
-
-            target_row = row_number
-            break
-
-    values = [[
-        store_name,
-        store_idx,
-        last_page,
-        last_date or "",
-        datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-    ]]
-
-    if target_row is None:
-
-        ws.append_rows(
-            values,
-            value_input_option="RAW"
-        )
-
-    else:
-
-        ws.update(
-        range_name=f"A{target_row}:E{target_row}",
-        values=values
-        )
-
-
-def get_page_date_range(orders):
-
-    dates = []
-
-    for order in orders:
-
-        d = get_order_date(
-            order
-        )
-
-        if d:
-            dates.append(d)
-
-    if not dates:
-        return None, None
-
-    return min(dates), max(dates)
-
-
-def make_sale_key(sale):
-
-    return "|".join([
-
-        str(sale.get("date", "")).strip(),
-
-        str(sale.get("store", "")).strip(),
-
-        str(sale.get("barcode", "")).strip(),
-
-        str(sale.get("receipt", "")).strip(),
-
-        str(sale.get("order_idx", "")).strip(),
-
-        str(sale.get("item_idx", "")).strip(),
-
-        str(sale.get("order_type", "판매")).strip(),
-
-    ])
-
-
-def find_sales_start_page(
-    session,
-    store_idx,
-    last_page
-):
-
-    print(
-        "  🔍 최초 7월 매출 "
-        "시작 페이지 탐색..."
-    )
-
-    # 최근 영역에서 50페이지 간격으로 몇 곳만 먼저 확인한다.
-    # 2,600페이지를 처음부터 읽는 방식은 사용하지 않는다.
-    search_start = max(
-        1,
-        last_page - INITIAL_LOOKBACK_PAGES
-    )
-
-    step = 50
-    probe_pages = list(
-        range(
-            search_start,
-            last_page + 1,
-            step
-        )
-    )
-
-    if last_page not in probe_pages:
-        probe_pages.append(last_page)
-
-    candidate = None
-
-    for page in probe_pages:
-
-        orders, _ = get_sales_page(
-            session,
-            page,
-            store_idx
-        )
-
-        if not orders:
-            continue
-
-        oldest, newest = (
-            get_page_date_range(
-                orders
-            )
-        )
-
-        print(
-            f"  🔎 probe page {page}: "
-            f"{oldest} ~ {newest}"
-        )
-
-        if (
-            newest is not None
-            and newest >= SALES_START_DATE
-        ):
-
-            candidate = page
-            break
-
-    # probe에서 못 찾으면 앞쪽으로 한 번 확장
-    if candidate is None:
-
-        expanded_start = max(
-            1,
-            search_start
-            - INITIAL_EXPAND_STEP
-        )
-
-        for page in range(
-            expanded_start,
-            search_start
-        ):
-
-            orders, _ = get_sales_page(
-                session,
-                page,
-                store_idx
-            )
-
-            if not orders:
-                continue
-
-            oldest, newest = (
-                get_page_date_range(
-                    orders
-                )
-            )
-
-            if (
-                newest is not None
-                and newest >= SALES_START_DATE
-            ):
-
-                candidate = page
-                break
-
-    if candidate is None:
-
-        raise Exception(
-            f"store_idx={store_idx}의 "
-            f"{SALES_START_DATE} 이후 "
-            "매출 시작 페이지를 찾지 못했습니다."
-        )
-
-    # 후보보다 앞쪽 최대 60페이지만 역방향으로 확인한다.
-    # 날짜가 섞여 있는 API라 전체 이진탐색은 사용하지 않는다.
-    back_start = max(
-        1,
-        candidate - 60
-    )
-
-    first_valid = candidate
-
-    for page in range(
-        back_start,
-        candidate + 1
-    ):
-
-        orders, _ = get_sales_page(
-            session,
-            page,
-            store_idx
-        )
-
-        if not orders:
-            continue
-
-        oldest, newest = (
-            get_page_date_range(
-                orders
-            )
-        )
-
-        if (
-            newest is not None
-            and newest >= SALES_START_DATE
-        ):
-
-            first_valid = page
-            break
-
-    result = max(
-        1,
-        first_valid - 1
-    )
-
-    print(
-        f"  🎯 7월 데이터 시작 근처: "
-        f"page {result}"
-    )
-
+def load_cursors():
+    ws = prepare_cursor_sheet()
+    rows = ws.get_all_values()
+    result = {}
+    for row in rows[1:]:
+        if len(row) >= 3 and row[0]:
+            try:
+                result[norm(row[0])] = int(row[2] or 0)
+            except Exception:
+                result[norm(row[0])] = 0
     return result
 
 
-# =====================================================
-# 매출 전체 조회
-#
-# ★ 핵심 변경
-# 매장별로 API를 각각 조회
-# =====================================================
+def save_cursor(store_name, store_idx, last_page, status="RUNNING"):
+    ws = prepare_cursor_sheet()
+    rows = ws.get_all_values()
+    target = None
+    for i, row in enumerate(rows[1:], start=2):
+        if row and norm(row[0]) == norm(store_name):
+            target = i
+            break
+    values = [[store_name, str(store_idx), str(last_page), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), status]]
+    if target is None:
+        ws.append_rows(values, value_input_option="RAW")
+    else:
+        ws.update(range_name=f"A{target}:E{target}", values=values)
 
 
-def append_sales_chunk_to_sheets(sales_data):
-    """조회 중간에 즉시 Google Sheets에 append하여 작업 중단 시 유실을 방지합니다."""
-    if not sales_data:
-        return
-
-    gc = get_google_client()
-    sh = gc.open_by_key(SPREADSHEET_ID)
-
-    try:
-        ws = sh.worksheet("매출데이터")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="매출데이터", rows=100000, cols=10)
-
-    header = [
-        "날짜", "매장", "바코드", "상품명", "옵션명",
-        "판매수량", "영수증번호", "주문번호", "상품순번", "판매구분",
-    ]
-
-    current_header = ws.row_values(1)
-    if not current_header:
-        ws.update("A1", [header])
-    elif current_header != header:
-        # 구버전 헤더는 최초 한 번만 마이그레이션
-        save_sales_to_sheets([])
-
+def append_sales_to_sheet(ws, sales, seen_keys):
     rows = []
-    for sale in sales_data:
+    new_sales = []
+    for sale in sales:
+        key = make_sale_key(sale)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         rows.append([
-            sale.get("date", ""),
-            sale.get("store", ""),
-            sale.get("barcode", ""),
-            sale.get("name", ""),
-            sale.get("option", ""),
-            sale.get("qty", 0),
-            sale.get("receipt", ""),
-            sale.get("order_idx", ""),
-            sale.get("item_idx", ""),
+            sale.get("date", ""), sale.get("store", ""), sale.get("barcode", ""),
+            sale.get("name", ""), sale.get("option", ""), sale.get("qty", 0),
+            sale.get("receipt", ""), sale.get("order_idx", ""), sale.get("item_idx", ""),
             sale.get("order_type", "판매"),
         ])
-
-    if not rows:
-        return
-
-    # 시트가 부족하면 append 실패 시 자동 확장 후 한 번 더 시도
-    try:
-        ws.append_rows(rows, value_input_option="RAW")
-    except Exception as first_error:
-        new_size = max(ws.row_count * 2, ws.row_count + len(rows) + 5000)
-        print(f"  📈 매출 시트 행 확장 {ws.row_count:,} → {new_size:,}")
-        ws.resize(rows=new_size)
-        try:
-            ws.append_rows(rows, value_input_option="RAW")
-        except Exception:
-            raise first_error
-
-    print(f"  💾 중간 저장 완료: {len(rows):,}건")
+        new_sales.append(sale)
+    for i in range(0, len(rows), SHEET_CHUNK_SIZE):
+        ws.append_rows(rows[i:i+SHEET_CHUNK_SIZE], value_input_option="RAW")
+    return len(rows), new_sales
 
 
-def get_sales(
-    session,
-    store_list,
-    existing_keys
-):
-
+def get_sales(session, store_list, existing_keys):
     print("💰 전체 매출 조회 시작...")
-
-    run_sale_count = 0
-    run_sale_qty = 0
-    run_return_count = 0
-    run_return_qty = 0
-
+    ws = prepare_sales_sheet()
     seen_keys = set(existing_keys)
-    state_ws, state = load_sales_sync_state()
-    initial_backfill = len(existing_keys) < BACKFILL_EXISTING_KEY_THRESHOLD
+    all_sales = []
+    cursors = load_cursors()
 
     for store_name, store_idx in store_list.items():
+        print("\n================================")
+        print(f"🏪 [{store_name}] 매출 조회 시작")
+        print(f"  store_idx={store_idx}")
 
-        print("")
-        print("================================")
-        print(f"🏪 [{store_name}] 조회 시작")
-
-        store_state = state.get(store_name, {})
-        saved_last_page = int(store_state.get("last_page", 0) or 0)
-
-        if initial_backfill or saved_last_page <= 0:
-            start_page = 1
-            mode_text = "전체 백필"
-        else:
-            start_page = max(1, saved_last_page - SALES_CURSOR_LOOKBACK)
-            mode_text = f"증분 조회 (page {start_page}~)"
-
-        print(f"  🔄 {mode_text}")
+        # 첫 호출로 전체 페이지 수 확인
+        probe_orders, last_page = get_sales_page(session, 1, store_idx=store_idx)
+        cursor = 0 if FULL_RESCAN else cursors.get(norm(store_name), 0)
+        start_page = max(1, cursor + 1)
+        if cursor >= last_page:
+            # 매일 최신 페이지를 다시 확인해 신규 주문/반품을 놓치지 않음
+            start_page = max(1, last_page - 14)
+        print(f"  📄 전체 페이지: {last_page:,}")
+        print(f"  ▶️ 시작 페이지: {start_page:,} (이전 커서 {cursor:,})")
 
         page = start_page
-        last_page = 1
-        store_buffer = []
-        last_orders = []
-        stale_pages = 0
-
-        while True:
-            orders, last_page = get_sales_page(
-                session,
-                page,
-                store_idx,
-            )
-            last_orders = orders
-
+        store_new = 0
+        while page <= last_page:
+            orders, actual_last_page = get_sales_page(session, page, store_idx=store_idx)
+            last_page = max(last_page, actual_last_page)
             if not orders:
+                save_cursor(store_name, store_idx, page, "DONE")
                 break
 
-            sales = convert_orders_to_sales(
-                orders,
-                forced_store_name=store_name,
-            )
+            sales = convert_orders_to_sales(orders, forced_store_name=store_name)
+            new_count, new_sales = append_sales_to_sheet(ws, sales, seen_keys)
+            all_sales.extend(new_sales)
+            store_new += new_count
 
-            new_count = 0
-            for sale in sales:
-                key = make_sale_key(sale)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                store_buffer.append(sale)
-                new_count += 1
+            dates = [get_order_date(o) for o in orders if get_order_date(o)]
+            date_info = ""
+            if dates:
+                date_info = f" / {min(dates)} ~ {max(dates)}"
+            print(f"  📄 page {page}/{last_page} 주문 {len(orders)}건 신규 {new_count}건{date_info}")
 
-                qty = int(sale.get("qty", 0) or 0)
-                if sale.get("order_type") == "반품":
-                    run_return_count += 1
-                    run_return_qty += qty
-                else:
-                    run_sale_count += 1
-                    run_sale_qty += qty
-
-            print(
-                f"  📄 page {page}/{last_page} "
-                f"주문 {len(orders)}건 신규 {new_count}건"
-            )
-
-            if not initial_backfill:
-                oldest, newest = get_page_date_range(orders)
-                if newest is None or newest < get_today() - timedelta(days=3):
-                    stale_pages += 1
-                else:
-                    stale_pages = 0
-                if stale_pages >= SALES_STALE_PAGE_LIMIT:
-                    print(
-                        f"  🛑 오래된 페이지 {SALES_STALE_PAGE_LIMIT}개 연속 → 증분 조회 종료"
-                    )
-                    break
-
-            # 1,000건 단위 중간 저장
-            if len(store_buffer) >= SHEET_CHUNK_SIZE:
-                append_sales_chunk_to_sheets(store_buffer)
-                store_buffer.clear()
-
-            # 5페이지마다 상태 저장. 데이터 먼저 저장하고 상태를 기록합니다.
-            if page % 5 == 0:
-                if store_buffer:
-                    append_sales_chunk_to_sheets(store_buffer)
-                    store_buffer.clear()
-
-                _, newest = get_page_date_range(orders)
-                save_sales_sync_state(
-                    state_ws,
-                    store_name,
-                    store_idx,
-                    page,
-                    newest.strftime("%Y-%m-%d") if newest else "",
-                )
-
-            if page >= int(last_page):
-                break
+            # 페이지 저장 직후 커서 기록: GitHub Actions가 중단돼도 다음 실행에서 이어감
+            save_cursor(store_name, store_idx, page, "RUNNING")
+            if page % 10 == 0:
+                print(f"  💾 중간 커서 저장: {store_name} page {page}")
             page += 1
 
-        if store_buffer:
-            append_sales_chunk_to_sheets(store_buffer)
-            store_buffer.clear()
+        save_cursor(store_name, store_idx, min(page-1, last_page), "DONE")
+        print(f"  ✅ [{store_name}] 완료 / 신규 {store_new:,}건")
 
-        _, newest = get_page_date_range(last_orders) if last_orders else (None, None)
-        save_sales_sync_state(
-            state_ws,
-            store_name,
-            store_idx,
-            page,
-            newest.strftime("%Y-%m-%d") if newest else "",
-        )
-
-    print("")
-    print("================================")
-    print(
-        f"📊 이번 실행 신규 데이터 "
-        f"{run_sale_count + run_return_count:,}건"
-    )
-
-    return {
-        "sale_count": run_sale_count,
-        "sale_qty": run_sale_qty,
-        "return_count": run_return_count,
-        "return_qty": run_return_qty,
-        "total_count": run_sale_count + run_return_count,
-    }
+    print("\n================================")
+    print(f"📊 전체 신규 저장 데이터 {len(all_sales):,}건")
+    return all_sales
 
 
 # =====================================================
-# 매출 저장
+# 기존 호출 호환용
+# 이미 get_sales 단계에서 페이지별 저장하므로
+# 여기서는 추가 저장을 하지 않는다.
 # =====================================================
 
-
-def save_sales_to_sheets(
-    sales_data
-):
-
+def save_sales_to_sheets(sales_data):
     print(
-        "📊 판매내역을 "
-        "Google Sheets에 저장 중..."
+        "  ℹ️ 매출은 API 페이지 조회 시 "
+        "Google Sheets에 즉시 저장되었습니다."
     )
 
-    gc = get_google_client()
-
-    sh = gc.open_by_key(
-        SPREADSHEET_ID
-    )
-
-    try:
-
-        ws = sh.worksheet(
-            "매출데이터"
-        )
-
-    except gspread.WorksheetNotFound:
-
-        ws = sh.add_worksheet(
-            title="매출데이터",
-            rows=100000,
-            cols=10
-        )
-
-    header = [
-        "날짜",
-        "매장",
-        "바코드",
-        "상품명",
-        "옵션명",
-        "판매수량",
-        "영수증번호",
-        "주문번호",
-        "상품순번",
-        "판매구분",
-    ]
-
-    existing = ws.get_all_values()
-
-    print("=" * 50)
-    print(f"기존 읽은 행수 : {len(existing):,}")
-
-    if existing:
-        print(f"헤더 : {existing[0]}")
-
-    print(existing[:5])
-
-    print("=" * 50)
-
-    
-    # -------------------------------------------------
-    # 기존 데이터 보존
-    #
-    # 이전 버전에서 '판매구분'이 없더라도
-    # 기존 매출을 삭제하지 않는다.
-    # -------------------------------------------------
-
-    if not existing:
-
-        ws.update(
-            "A1",
-            [header]
-        )
-
-        existing = [header]
-
-    else:
-
-        old_header = existing[0]
-
-        if old_header != header:
-
-            print(
-                "  ⚠️ 기존 매출 시트 "
-                "헤더가 새 구조와 다릅니다."
-            )
-
-            old_index = {
-                name: idx
-                for idx, name
-                in enumerate(old_header)
-            }
-
-            missing = [
-                x
-                for x in header
-                if x not in old_index
-            ]
-
-            if missing:
-
-                print(
-                    f"  ℹ️ 누락 헤더: "
-                    f"{missing}"
-                )
-
-            migrated_rows = []
-
-            for row in existing[1:]:
-
-                def old_value(
-                    field,
-                    default=""
-                ):
-
-                    idx = old_index.get(
-                        field
-                    )
-
-                    if (
-                        idx is None
-                        or idx >= len(row)
-                    ):
-                        return default
-
-                    return row[idx]
-
-                migrated_rows.append([
-                    old_value("날짜"),
-                    old_value("매장"),
-                    old_value("바코드"),
-                    old_value("상품명"),
-                    old_value("옵션명"),
-                    old_value("판매수량", 0),
-                    old_value("영수증번호"),
-                    old_value("주문번호"),
-                    old_value("상품순번"),
-                    old_value(
-                        "판매구분",
-                        "판매"
-                    ) or "판매",
-                ])
-
-            print(
-                f"  🔄 기존 "
-                f"{len(migrated_rows):,}건을 "
-                "새 구조로 보존 변환합니다."
-            )
-
-            ws.clear()
-
-            ws.update(
-                "A1",
-                [header]
-            )
-
-            for i in range(
-                0,
-                len(migrated_rows),
-                SHEET_CHUNK_SIZE
-            ):
-
-                chunk = migrated_rows[
-                    i:i + SHEET_CHUNK_SIZE
-                ]
-
-                start = (
-                    2 + i
-                )
-
-                end = (
-                    start
-                    + len(chunk)
-                    - 1
-                )
-
-                ws.update(
-                    f"A{start}:J{end}",
-                    chunk
-                )
-
-            existing = [
-                header,
-                *migrated_rows
-            ]
-    # -------------------------------------------------
-    # 기존 중복키
-    # -------------------------------------------------
-
-    existing_keys = set()
-
-    for row in existing[1:]:
-
-        if len(row) < 10:
-            continue
-
-        key = (
-            str(row[0]).strip(),
-            str(row[1]).strip(),
-            str(row[2]).strip(),
-            str(row[7]).strip(),
-            str(row[8]).strip(),
-            str(row[9]).strip()
-            if row[9]
-            else "판매",
-        )
-
-        existing_keys.add(key)
-
-
-    print(
-        f"기존 KEY 개수 : {len(existing_keys):,}"
-    )
-    
-    # -------------------------------------------------
-    # 신규 데이터 필터링
-    # -------------------------------------------------
-
-    rows = []
-
-
-    for sale in sales_data:
-
-        key = make_sale_key(
-            sale
-        )
-
-
-        if key in existing_keys:
-            continue
-
-
-        rows.append([
-            sale.get("date", ""),
-            sale.get("store", ""),
-            sale.get("barcode", ""),
-            sale.get("name", ""),
-            sale.get("option", ""),
-            sale.get("qty", 0),
-            sale.get("receipt", ""),
-            sale.get("order_idx", ""),
-            sale.get("item_idx", ""),
-            sale.get("order_type", "판매"),
-        ])
-
-
-        existing_keys.add(key)
-
-
-    if not rows:
-
-        print(
-            "  ℹ️ 새로 저장할 "
-            "매출/반품이 없습니다."
-        )
-
-        return
-    # -----------------------------------------
-    # 시트 행 자동 확장
-    # -----------------------------------------
-
-    required_rows = len(existing) + len(rows) + 10
-
-    if ws.row_count < required_rows:
-
-        new_size = required_rows + 5000
-
-        print(
-            f"  📈 시트 행 확장 "
-            f"{ws.row_count:,} → {new_size:,}"
-        )
-
-        ws.resize(
-            rows=new_size
-        )
-
-
-    print(
-        f"  📦 신규 저장 "
-        f"매출/반품: "
-        f"{len(rows):,}건"
-    )
-
-
-    # -----------------------------------------
-    # 데이터 저장 (append 방식)
-    # -----------------------------------------
-
-    print(
-        "  📥 Google Sheets append 저장 시작"
-    )
-
-
-    for i in range(
-        0,
-        len(rows),
-        SHEET_CHUNK_SIZE
-    ):
-
-        chunk = rows[
-            i:i + SHEET_CHUNK_SIZE
-        ]
-
-
-        ws.append_rows(
-            chunk,
-            value_input_option="RAW"
-        )
-
-
-    print(
-        f"🎉 신규 매출/반품 "
-        f"{len(rows):,}건 저장 완료"
-    )
-    
 # =====================================================
 # 최근 7일 판매속도
 # =====================================================
@@ -2576,37 +1807,75 @@ def calculate_7day_average():
 # 최종 요약
 # =====================================================
 
-def print_sales_summary(sales_data):
+def print_sales_summary(
+    sales_data
+):
 
-    if isinstance(sales_data, dict):
-        sale_count = int(sales_data.get("sale_count", 0))
-        sale_qty = int(sales_data.get("sale_qty", 0))
-        return_count = int(sales_data.get("return_count", 0))
-        return_qty = int(sales_data.get("return_qty", 0))
-    else:
-        sale_count = 0
-        sale_qty = 0
-        return_count = 0
-        return_qty = 0
+    sale_count = 0
+    sale_qty = 0
 
-        for sale in sales_data:
-            qty = int(sale.get("qty", 0) or 0)
-            if sale.get("order_type") == "반품":
-                return_count += 1
-                return_qty += qty
-            else:
-                sale_count += 1
-                sale_qty += qty
+    return_count = 0
+    return_qty = 0
+
+    for sale in sales_data:
+
+        qty = int(
+            sale.get(
+                "qty",
+                0
+            )
+            or 0
+        )
+
+        if sale.get(
+            "order_type"
+        ) == "반품":
+
+            return_count += 1
+            return_qty += qty
+
+        else:
+
+            sale_count += 1
+            sale_qty += qty
 
     print("")
-    print("----------------------------------------")
-    print("📊 이번 실행 매출 요약")
-    print(f"  판매 건수: {sale_count:,}건")
-    print(f"  판매 수량: {sale_qty:,}개")
-    print(f"  반품 건수: {return_count:,}건")
-    print(f"  반품 수량: {return_qty:,}개")
-    print(f"  순판매수량: {sale_qty - return_qty:,}개")
-    print("----------------------------------------")
+    print(
+        "----------------------------------------"
+    )
+
+    print(
+        "📊 이번 실행 매출 요약"
+    )
+
+    print(
+        f"  판매 건수: "
+        f"{sale_count:,}건"
+    )
+
+    print(
+        f"  판매 수량: "
+        f"{sale_qty:,}개"
+    )
+
+    print(
+        f"  반품 건수: "
+        f"{return_count:,}건"
+    )
+
+    print(
+        f"  반품 수량: "
+        f"{return_qty:,}개"
+    )
+
+    print(
+        f"  순판매수량: "
+        f"{sale_qty - return_qty:,}개"
+    )
+
+    print(
+        "----------------------------------------"
+    )
 
 
 # =====================================================
@@ -2654,27 +1923,34 @@ def main():
         # 재고
         # =================================================
 
-        stock_success = False
+        stock_data = get_all_stock(
 
-        try:
-            stock_data = get_all_stock(
-                session,
-                store_list
-            )
-            save_stock_to_sheets(stock_data)
-            stock_success = True
-            print("========================================")
-            print("📦 재고 동기화 완료!")
-            print("========================================")
-        except Exception as e:
-            print(f"⚠️ 재고 동기화 실패: {e}")
-            print("ℹ️ 재고는 건너뛰고 매출 동기화를 계속합니다.")
+            session,
+
+            store_list
+        )
+
+        save_stock_to_sheets(
+            stock_data
+        )
+
+        print(
+            "========================================"
+        )
+
+        print(
+            "📦 재고 동기화 완료!"
+        )
+
+        print(
+            "========================================"
+        )
+
+        sales_success = False
 
         # =================================================
         # 매출
         # =================================================
-
-        sales_success = False
 
         try:
 
@@ -2724,10 +2000,16 @@ def main():
             print(
                 f"✅ 이번 실행 신규 "
                 f"판매/반품 내역: "
-                f"{sales_data.get('total_count', 0):,}건"
+                f"{len(sales_data):,}건"
             )
 
-            # 매출은 조회 중 SHEET_CHUNK_SIZE 단위로 이미 저장되었습니다.
+            # ---------------------------------------------
+            # 저장
+            # ---------------------------------------------
+
+            save_sales_to_sheets(
+                sales_data
+            )
 
             # ---------------------------------------------
             # 판매속도
@@ -2735,11 +2017,10 @@ def main():
 
             calculate_7day_average()
 
-            sales_success = True
-
             print(
                 "💰 매출 동기화 완료!"
             )
+            sales_success = True
 
         except Exception as e:
 
@@ -2748,8 +2029,8 @@ def main():
             )
 
             print(
-                "ℹ️ 매출 저장은 완료되지 않았으며, "
-                "재고는 별도로 처리되었습니다."
+                "ℹ️ 매출 오류와 관계없이 "
+                "재고 데이터는 정상 저장되었습니다."
             )
 
         print(
