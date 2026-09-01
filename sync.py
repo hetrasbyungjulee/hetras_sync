@@ -33,12 +33,12 @@ SELLMATE_DOMAIN = os.environ.get(
     "hetras",
 ).strip()
 
-SELLMATE_CLIENT_ID = os.environ.get(
-    "SELLMATE_CLIENT_ID",
+SELLMATE_CLIENT_ID = (
+    os.environ.get("SELLMATE_CLIENT_ID") or ""
 ).strip()
 
-SELLMATE_CLIENT_SECRET = os.environ.get(
-    "SELLMATE_CLIENT_SECRET",
+SELLMATE_CLIENT_SECRET = (
+    os.environ.get("SELLMATE_CLIENT_SECRET") or ""
 ).strip()
 
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
