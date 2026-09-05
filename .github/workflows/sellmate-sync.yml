@@ -2,8 +2,7 @@ name: 셀메이트 자동 동기화
 
 on:
   schedule:
-    # 한국시간 오전 6시
-    # UTC 기준 전날 21시
+    # 한국시간 오전 6시 = UTC 전날 21시
     - cron: '0 21 * * *'
 
   workflow_dispatch:
@@ -15,33 +14,44 @@ on:
 
 jobs:
   sync:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: 코드 가져오기
         uses: actions/checkout@v4
-
 
       - name: Python 설정
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-
       - name: 패키지 설치
         run: |
           pip install requests gspread google-auth
 
+      # ★ 어떤 sync.py가 실행되는지 확인
+      - name: sync.py 버전 확인
+        run: |
+          echo "===== 실행 위치 ====="
+          pwd
+          echo "===== sync.py 경로 ====="
+          realpath sync.py
+          echo "===== External API 코드 확인 ====="
+          grep -n "SELLMATE_CLIENT_ID" sync.py || true
+          grep -n "SELLMATE_CLIENT_SECRET" sync.py || true
+          echo "===== 구버전 코드 확인 ====="
+          grep -n "SELLMATE_JS_VERSION" sync.py || true
+          grep -n "/json/order" sync.py || true
+          echo "===== sync.py 시작 부분 ====="
+          sed -n '1,55p' sync.py
 
       - name: 셀메이트 동기화 실행
         env:
-          SELLMATE_ID: ${{ secrets.SELLMATE_ID }}
-          SELLMATE_PW: ${{ secrets.SELLMATE_PW }}
+          SELLMATE_CLIENT_ID: ${{ secrets.SELLMATE_CLIENT_ID }}
+          SELLMATE_CLIENT_SECRET: ${{ secrets.SELLMATE_CLIENT_SECRET }}
           SELLMATE_DOMAIN: ${{ secrets.SELLMATE_DOMAIN }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           FORCE_SYNC: ${{ github.event.inputs.force }}
-
-        run: python sync.py
+        run: |
+          python sync.py
