@@ -36,6 +36,10 @@ SALES_RANGE_DAYS = int(os.environ.get("SALES_RANGE_DAYS", "14"))
 SALES_HISTORY_START = os.environ.get("SALES_HISTORY_START_DATE", "2026-07-01")
 FORCE_SYNC = os.environ.get("FORCE_SYNC", "false").lower() == "true"
 
+# API 원본 응답을 먼저 파일로 보존한 뒤, 저장된 원본을 다시 읽어 가공한다.
+RAW_API_DIR = os.environ.get("RAW_API_DIR", "raw_sellmate")
+REUSE_RAW_ON_RETRY = os.environ.get("REUSE_RAW_ON_RETRY", "true").lower() == "true"
+
 SALES_SHEET = "매출데이터"
 STOCK_SHEET = "재고데이터"
 VELOCITY_SHEET = "판매속도"
@@ -208,6 +212,44 @@ def find_list_payload(payload: Any) -> List[Dict[str, Any]]:
                 return dict_items
 
     return []
+
+
+def _safe_filename(value: Any) -> str:
+    text = str(value)
+    return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in text)
+
+
+def _raw_order_path(start_date: date, end_date: date, page: int) -> str:
+    folder = os.path.join(
+        RAW_API_DIR,
+        "order",
+        f"{start_date.isoformat()}_{end_date.isoformat()}",
+    )
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"page_{page:06d}.json")
+
+
+def save_raw_response(path: str, raw_body: bytes) -> None:
+    """HTTP 응답 body 바이트를 JSON 재직렬화/변경 없이 그대로 저장한다."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fp:
+        fp.write(raw_body)
+    os.replace(tmp, path)
+
+
+def load_raw_json(path: str) -> Any:
+    with open(path, "r", encoding="utf-8") as fp:
+        return json.load(fp)
+
+
+def raw_file_status(path: str) -> str:
+    if not os.path.exists(path):
+        return "없음"
+    try:
+        return f"있음 ({os.path.getsize(path):,} bytes)"
+    except OSError:
+        return "있음"
 
 
 def get_last_page(payload: Any, item_count: int) -> int:
@@ -1465,7 +1507,13 @@ def get_sales_page(
                 f"기간={start_date}~{end_date} 응답: {res.status_code}"
             )
             if res.status_code == 200:
-                payload = res.json()
+                # [1단계] Sellmate가 돌려준 HTTP body 원문을 먼저 저장한다.
+                raw_path = _raw_order_path(start_date, end_date, page)
+                save_raw_response(raw_path, res.content)
+                print(f"  💾 원본 응답 저장: {raw_path} ({len(res.content):,} bytes)")
+
+                # [2단계] 저장된 원본 파일을 다시 읽어서 JSON 파싱/가공한다.
+                payload = load_raw_json(raw_path)
                 orders = find_list_payload(payload)
                 last_page = get_last_page(payload, len(orders))
                 if len(orders) == PER_PAGE:
