@@ -812,18 +812,85 @@ _ORDER_DETAIL_CACHE: Dict[str, Any] = {}
 
 
 def _extract_receipt_number(order: Dict[str, Any]) -> str:
-    """목록 응답의 영수증 번호를 최대한 안전하게 추출한다."""
-    keys = (
+    """
+    영수증번호만 추출한다.
+
+    중요:
+    scalar_value()는 dict에 idx가 있으면 idx를 반환하지만,
+    영수증번호 추출에서는 idx를 절대로 영수증번호로 취급하면 안 된다.
+    이전 코드가 receipt 객체의 idx(예: 350900)를 receipt_number로 오인해
+    /order/350900을 호출했고 Sellmate가 404를 반환했다.
+    """
+    direct_keys = (
         "receipt_number", "receiptNumber", "receipt_no", "receiptNo",
-        "receipt", "receipt_num", "receiptNum",
+        "receipt_num", "receiptNum", "receipt_number_text",
+        "order_number", "orderNumber", "order_no", "orderNo",
     )
+
+    # 1) 명시적인 영수증/주문번호 필드 우선
     for obj in walk_dicts(order):
-        for key in keys:
+        for key in direct_keys:
             if key in obj:
-                value = scalar_value(obj.get(key))
-                if value:
-                    return value
+                value = obj.get(key)
+                if isinstance(value, (str, int, float)) and str(value).strip():
+                    return str(value).strip()
+                if isinstance(value, dict):
+                    # receipt/order 객체 내부에서 번호로 쓰이는 필드만 허용
+                    for subkey in (
+                        "number", "no", "receipt_number", "receiptNumber",
+                        "order_number", "orderNumber", "value", "code",
+                    ):
+                        sub = value.get(subkey)
+                        if isinstance(sub, (str, int, float)) and str(sub).strip():
+                            return str(sub).strip()
+
+    # 2) receipt 객체 자체가 별도 객체로 내려오는 경우
+    #    여기서는 idx/id를 사용하지 않는다.
+    for obj in walk_dicts(order):
+        for container_key in ("receipt", "receiptInfo", "receipt_info", "receiptData"):
+            container = obj.get(container_key)
+            if isinstance(container, dict):
+                for key in (
+                    "number", "no", "receipt_number", "receiptNumber",
+                    "order_number", "orderNumber", "value", "code",
+                ):
+                    value = container.get(key)
+                    if isinstance(value, (str, int, float)) and str(value).strip():
+                        return str(value).strip()
+
     return ""
+
+
+def _extract_detail_id_candidates(order: Dict[str, Any]) -> List[str]:
+    """상세 API에서 사용할 식별자 후보. 명시적 영수증번호를 최우선으로 한다."""
+    candidates: List[str] = []
+    receipt = _extract_receipt_number(order)
+    if receipt:
+        candidates.append(receipt)
+
+    # Sellmate 응답에 영수증번호가 아예 노출되지 않는 경우를 대비한 2차 후보.
+    # API 문서상 path 명칭은 receipt_number이므로 무작정 idx를 영수증으로 간주하지 않는다.
+    for key in ("transaction_idx", "transactionId", "transaction_id"):
+        value = order.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            candidates.append(str(value).strip())
+
+    return list(dict.fromkeys(candidates))
+
+
+def _debug_receipt_candidates(order: Dict[str, Any]) -> str:
+    """실제 응답에서 영수증 관련 필드명을 확인하기 위한 안전한 진단 문자열."""
+    names = []
+    for obj in walk_dicts(order):
+        for key, value in obj.items():
+            key_l = str(key).lower()
+            if any(token in key_l for token in ("receipt", "order_number", "ordernumber")):
+                if isinstance(value, dict):
+                    subkeys = ",".join(str(k) for k in value.keys())
+                    names.append(f"{key}={{ {subkeys} }}")
+                else:
+                    names.append(f"{key}={str(value)[:80]}")
+    return " | ".join(names[:20]) if names else "없음"
 
 
 def _unwrap_order_detail(payload: Any) -> Dict[str, Any]:
@@ -1460,17 +1527,18 @@ def sync_sales(session: requests.Session, sales_ws: gspread.Worksheet, existing_
                 converted = order_to_sales(order)
 
                 # 중요: /order 목록 API가 주문 헤더만 반환하는 경우
-                # /order/{receipt_number} 상세 API에서 상품 라인을 다시 조회한다.
+                # /order/{receipt_number} 상세 API는 실제 영수증번호가 확인된 경우에만 조회한다.
                 if not converted:
-                    receipt_number = _extract_receipt_number(order)
-                    if receipt_number:
+                    detail_candidates = _extract_detail_id_candidates(order)
+                    for detail_id in detail_candidates:
                         detail_lookups += 1
-                        detail = get_order_detail(session, receipt_number)
+                        detail = get_order_detail(session, detail_id)
                         if detail:
                             merged = _merge_order_with_detail(order, detail)
                             converted = order_to_sales(merged)
                             if converted:
                                 detail_converted += len(converted)
+                                break
 
                 sales.extend(converted)
 
