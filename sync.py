@@ -33,7 +33,7 @@ PER_PAGE = int(os.environ.get("SELLMATE_PER_PAGE", "100"))
 API_RETRY_COUNT = int(os.environ.get("API_RETRY_COUNT", "3"))
 SALES_AVERAGE_DAYS = 7
 SALES_RANGE_DAYS = int(os.environ.get("SALES_RANGE_DAYS", "14"))
-SALES_HISTORY_START = os.environ.get("SALES_HISTORY_START_DATE", "2000-01-01")
+SALES_HISTORY_START = os.environ.get("SALES_HISTORY_START_DATE", "2026-07-01")
 FORCE_SYNC = os.environ.get("FORCE_SYNC", "false").lower() == "true"
 
 SALES_SHEET = "매출데이터"
@@ -100,10 +100,28 @@ def fail(message: str) -> None:
 def parse_date(value: Any) -> Optional[date]:
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
     text = str(value).strip()
     if not text:
         return None
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+
+    # ISO 8601 timezone 포함 문자열 대응
+    try:
+        iso_text = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(iso_text).date()
+    except (ValueError, TypeError):
+        pass
+
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ):
         try:
             return datetime.strptime(text[:19], fmt).date()
         except ValueError:
@@ -134,39 +152,100 @@ def first_nonempty(*values: Any) -> str:
 
 
 def find_list_payload(payload: Any) -> List[Dict[str, Any]]:
-    """External API의 data 구조가 배열/중첩객체인 경우 최대한 안전하게 추출."""
+    """
+    Sellmate External API의 다양한 응답 구조에서
+    실제 데이터 배열을 최대한 안전하게 추출한다.
+    """
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
+
     if not isinstance(payload, dict):
         return []
 
-    for key in ("data", "items", "results", "orders", "stocks"):
+    # 우선순위가 높은 배열 키
+    preferred_keys = (
+        "data",
+        "items",
+        "results",
+        "orders",
+        "order",
+        "stocks",
+        "stock",
+        "details",
+        "orderDetails",
+        "orderItems",
+        "order_items",
+        "orderProducts",
+        "order_products",
+        "products",
+        "list",
+        "rows",
+    )
+
+    for key in preferred_keys:
         value = payload.get(key)
+
         if isinstance(value, list):
-            return [x for x in value if isinstance(x, dict)]
+            result = [x for x in value if isinstance(x, dict)]
+            if result:
+                return result
+
         if isinstance(value, dict):
             nested = find_list_payload(value)
             if nested:
                 return nested
+
+    # 재귀적으로 모든 dict를 탐색
+    for value in payload.values():
+        if isinstance(value, dict):
+            nested = find_list_payload(value)
+            if nested:
+                return nested
+
+        elif isinstance(value, list):
+            dict_items = [x for x in value if isinstance(x, dict)]
+            if dict_items:
+                return dict_items
+
     return []
 
 
 def get_last_page(payload: Any, item_count: int) -> int:
+    """API 응답의 pagination/meta에서 마지막 페이지를 안전하게 계산한다."""
+    if isinstance(payload, list):
+        return 999999 if item_count >= PER_PAGE else 1
+
+    containers: List[Dict[str, Any]] = []
     if isinstance(payload, dict):
-        for container in (
-            payload,
-            as_dict(payload.get("meta")),
-            as_dict(payload.get("pagination")),
-            as_dict(payload.get("links")),
+        containers.append(payload)
+        for key in ("meta", "pagination", "paginate", "pageInfo", "page_info", "paging"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+
+    for container in containers:
+        for key in (
+            "lastPage", "last_page", "totalPages", "total_pages",
+            "pageCount", "page_count", "pages",
         ):
-            for key in ("last_page", "lastPage", "total_pages", "totalPages", "pageCount"):
-                value = container.get(key)
-                if value not in (None, ""):
-                    try:
-                        return max(1, int(value))
-                    except (ValueError, TypeError):
-                        pass
-    return 1 if item_count == 0 else 1
+            value = container.get(key)
+            if value not in (None, ""):
+                try:
+                    return max(1, int(value))
+                except (ValueError, TypeError):
+                    pass
+
+        total = container.get("total")
+        per_page = container.get("perPage") or container.get("per_page") or PER_PAGE
+        if total not in (None, ""):
+            try:
+                total_int = int(total)
+                per_page_int = max(1, int(per_page))
+                return max(1, (total_int + per_page_int - 1) // per_page_int)
+            except (ValueError, TypeError):
+                pass
+
+    return 999999 if item_count >= PER_PAGE else 1
 
 
 # ============================================================
@@ -207,7 +286,7 @@ def ensure_worksheet(sh: gspread.Spreadsheet, title: str, rows: int, cols: int) 
 def ensure_header(ws: gspread.Worksheet, header: List[str]) -> None:
     values = ws.get_all_values()
     if not values:
-        ws.update("A1", [header])
+        ws.update([header], "A1")
         return
     if values[0] == header:
         return
@@ -218,7 +297,7 @@ def ensure_header(ws: gspread.Worksheet, header: List[str]) -> None:
         if col not in merged:
             merged.append(col)
     if merged != old:
-        ws.update("A1", [merged])
+        ws.update([merged], "A1")
 
 
 # ============================================================
@@ -474,13 +553,13 @@ def sync_stock(session: requests.Session, store_map: Dict[str, Any]) -> bool:
         keep = []
 
     ws.clear()
-    ws.update("A1", [STOCK_HEADER])
+    ws.update([STOCK_HEADER], "A1")
     combined = keep + all_rows
     for offset in range(0, len(combined), 5000):
         chunk = combined[offset:offset + 5000]
         start = offset + 2
         end = start + len(chunk) - 1
-        ws.update(f"A{start}:F{end}", chunk)
+        ws.update(chunk, f"A{start}:F{end}")
 
     print(f"✅ 재고 {len(all_rows):,}건 저장 완료")
     return True
@@ -489,101 +568,616 @@ def sync_stock(session: requests.Session, store_map: Dict[str, Any]) -> bool:
 # ============================================================
 # Sales normalization
 # ============================================================
+def get_nested_value(data: Any, paths: Iterable[Tuple[str, ...]]) -> Any:
+    """
+    여러 후보 경로를 순서대로 탐색한다.
 
-def extract_order_items(order: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    for key in ("items", "order_items", "orderItems", "products", "details"):
+    예:
+        get_nested_value(
+            order,
+            [
+                ("store", "name"),
+                ("store", "store_name"),
+                ("storeName",),
+            ]
+        )
+    """
+    for path in paths:
+        current = data
+
+        try:
+            for key in path:
+                if not isinstance(current, dict):
+                    current = None
+                    break
+                current = current.get(key)
+
+            if current not in (None, ""):
+                return current
+
+        except Exception:
+            continue
+
+    return None
+
+
+def scalar_value(value: Any) -> str:
+    """
+    문자열/숫자는 그대로 문자열로 만들고,
+    dict가 들어오면 대표적인 코드/이름 필드를 추출한다.
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, dict):
+        return first_nonempty(
+            value.get("code"),
+            value.get("value"),
+            value.get("id"),
+            value.get("idx"),
+            value.get("name"),
+            value.get("text"),
+        )
+
+    return str(value).strip()
+
+
+def find_first_value(data: Dict[str, Any], keys: Iterable[str]) -> str:
+    """
+    현재 dict의 1-depth에서 후보 필드를 찾는다.
+    """
+    for key in keys:
+        if key in data:
+            value = scalar_value(data.get(key))
+            if value:
+                return value
+
+    return ""
+
+
+def walk_dicts(value: Any) -> Iterable[Dict[str, Any]]:
+    """
+    JSON 전체를 재귀적으로 순회하면서 모든 dict를 반환한다.
+    """
+    if isinstance(value, dict):
+        yield value
+
+        for child in value.values():
+            yield from walk_dicts(child)
+
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_dicts(child)
+
+
+def looks_like_product_item(item: Dict[str, Any]) -> bool:
+    """
+    이 dict가 실제 판매 상품 항목인지 판단한다.
+    """
+    barcode = find_first_value(
+        item,
+        (
+            "barcode",
+            "barcode1",
+            "barcodeNo",
+            "barcode_number",
+            "productBarcode",
+            "product_barcode",
+            "code1",
+            "sku",
+            "itemCode",
+        ),
+    )
+
+    qty = find_first_value(
+        item,
+        (
+            "qty",
+            "quantity",
+            "sales_qty",
+            "salesQuantity",
+            "count",
+            "ea",
+            "amount",
+        ),
+    )
+
+    product_name = find_first_value(
+        item,
+        (
+            "product_name",
+            "productName",
+            "name",
+            "itemName",
+            "goodsName",
+            "goods_name",
+        ),
+    )
+
+    # 바코드가 있으면 가장 확실
+    if barcode:
+        return True
+
+    # 바코드가 없더라도 상품명 + 수량이 있으면 상품으로 간주
+    if product_name and qty:
+        return True
+
+    return False
+
+
+def extract_product_items(order: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    주문 JSON 내부에서 실제 상품 항목들을 추출한다.
+
+    Sellmate 응답 구조가 버전/계정에 따라 조금 달라도
+    가능한 한 모두 대응한다.
+    """
+    candidates: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    preferred_keys = (
+        "items",
+        "order_items",
+        "orderItems",
+        "order_details",
+        "orderDetails",
+        "details",
+        "products",
+        "orderProducts",
+        "order_products",
+        "productItems",
+        "product_items",
+        "goods",
+        "goodsItems",
+        "lines",
+        "lineItems",
+    )
+
+    def add_candidate(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+
+        if not looks_like_product_item(item):
+            return
+
+        identity = id(item)
+
+        if identity in seen_ids:
+            return
+
+        seen_ids.add(identity)
+        candidates.append(item)
+
+    # 1차: 명시적인 상품 배열부터 찾는다.
+    for key in preferred_keys:
         value = order.get(key)
+
         if isinstance(value, list):
             for item in value:
-                if isinstance(item, dict):
-                    yield item
-            return
-    # 상세 구조가 상품 1건짜리 주문인 경우
+                add_candidate(item)
+
+        elif isinstance(value, dict):
+            # 상품이 한 단계 더 들어있는 경우
+            for child in walk_dicts(value):
+                add_candidate(child)
+
+    # 2차: 전체 JSON 재귀 탐색
+    if not candidates:
+        for item in walk_dicts(order):
+            add_candidate(item)
+
+    # 3차: 주문 자체가 상품 1건인 구조
+    if not candidates and looks_like_product_item(order):
+        candidates.append(order)
+
+    return candidates
+
+
+def extract_order_items(order: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    """
+    주문 1건에서 실제 판매 상품들을 추출한다.
+    """
+    items = extract_product_items(order)
+
+    if items:
+        for item in items:
+            yield item
+        return
+
+    # 상품 배열을 찾지 못한 경우 주문 자체를 1개 상품으로 시도
     yield order
 
 
+def find_recursive_scalar(data: Any, keys: Iterable[str]) -> str:
+    """중첩 JSON 전체에서 후보 키의 첫 유효값을 찾는다."""
+    keyset = set(keys)
+    for obj in walk_dicts(data):
+        for key in keyset:
+            if key in obj:
+                value = scalar_value(obj.get(key))
+                if value:
+                    return value
+    return ""
+
+
+def find_recursive_date(data: Any) -> str:
+    candidates = (
+        "datetime", "order_datetime", "orderDateTime", "ordered_at",
+        "orderedAt", "created_at", "createdAt", "date", "order_date",
+        "orderDate", "salesDate", "saleDate", "regDate", "regDatetime",
+        "registeredAt", "transactionDate", "transactionDatetime",
+    )
+    for obj in walk_dicts(data):
+        for key in candidates:
+            if key in obj:
+                value = scalar_value(obj.get(key))
+                if parse_date(value):
+                    return value
+    return ""
+
+
 def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
-    order_date = parse_date(first_nonempty(
-        order.get("datetime"),
-        order.get("order_datetime"),
-        order.get("created_at"),
-        order.get("ordered_at"),
-        order.get("date"),
-    ))
+    """
+    Sellmate order 1건을 매출데이터 행으로 변환한다.
+
+    다양한 API 응답 필드명을 지원하며,
+    주문 안에 여러 상품이 있으면 상품별로 행을 생성한다.
+    """
+
+    # --------------------------------------------------------
+    # 주문일시
+    # --------------------------------------------------------
+    order_datetime = first_nonempty(
+        scalar_value(order.get("datetime")),
+        scalar_value(order.get("order_datetime")),
+        scalar_value(order.get("orderDateTime")),
+        scalar_value(order.get("ordered_at")),
+        scalar_value(order.get("orderedAt")),
+        scalar_value(order.get("created_at")),
+        scalar_value(order.get("createdAt")),
+        scalar_value(order.get("date")),
+        scalar_value(order.get("order_date")),
+        scalar_value(order.get("orderDate")),
+    )
+
+    # 중첩된 주문 객체가 있는 경우
+    if not order_datetime:
+        nested_order = as_dict(order.get("order"))
+
+        order_datetime = first_nonempty(
+            scalar_value(nested_order.get("datetime")),
+            scalar_value(nested_order.get("order_datetime")),
+            scalar_value(nested_order.get("orderDateTime")),
+            scalar_value(nested_order.get("created_at")),
+            scalar_value(nested_order.get("createdAt")),
+            scalar_value(nested_order.get("date")),
+            scalar_value(nested_order.get("order_date")),
+            scalar_value(nested_order.get("orderDate")),
+        )
+
+    order_date = parse_date(order_datetime)
+
     if not order_date:
+        order_datetime = find_recursive_date(order)
+        order_date = parse_date(order_datetime)
+
+    if not order_date:
+        print("  ⚠️ 주문일시 필드를 찾지 못해 주문 1건을 건너뜁니다.")
         return []
 
+    # --------------------------------------------------------
+    # 매장
+    # --------------------------------------------------------
     order_store = as_dict(order.get("store"))
-    store_name = norm(first_nonempty(
-        order.get("store_name"),
-        order.get("storeName"),
-        order_store.get("name"),
-        order_store.get("store_name"),
-    ))
-    receipt = first_nonempty(order.get("receipt_number"), order.get("receiptNumber"), order.get("receipt"))
-    order_number = first_nonempty(
-        order.get("order_number"),
-        order.get("orderNumber"),
-        order.get("order_no"),
-        order.get("origin_order_number"),
-        order.get("idx"),
-    )
-    order_type_raw = norm(first_nonempty(
-        order.get("order_type"),
-        order.get("orderType"),
-        order.get("type"),
-    ))
-    is_return = any(word in order_type_raw.lower() for word in ("반품", "환불", "취소", "return", "refund", "cancel"))
 
-    sales = []
-    for item_pos, item in enumerate(extract_order_items(order), start=1):
-        barcode = first_nonempty(
-            item.get("barcode"),
-            item.get("code1"),
-            item.get("barcode1"),
-            as_dict(item.get("variant")).get("barcode"),
+    store_name = first_nonempty(
+        scalar_value(order.get("store_name")),
+        scalar_value(order.get("storeName")),
+        scalar_value(order.get("store_name_ko")),
+        scalar_value(order.get("storeNameKo")),
+        scalar_value(order_store.get("name")),
+        scalar_value(order_store.get("store_name")),
+        scalar_value(order_store.get("storeName")),
+        scalar_value(order.get("shop_name")),
+        scalar_value(order.get("shopName")),
+    )
+
+    # 중첩된 매장 정보 탐색
+    if not store_name:
+        for obj in walk_dicts(order):
+            possible = first_nonempty(
+                scalar_value(obj.get("store_name")),
+                scalar_value(obj.get("storeName")),
+                scalar_value(obj.get("shop_name")),
+                scalar_value(obj.get("shopName")),
+            )
+
+            if possible:
+                store_name = possible
+                break
+
+    if not store_name:
+        store_name = norm(find_recursive_scalar(order, ("storeName", "store_name", "shopName", "shop_name")))
+    store_name = norm(store_name)
+
+    # --------------------------------------------------------
+    # 영수증 번호
+    # --------------------------------------------------------
+    receipt = first_nonempty(
+        scalar_value(order.get("receipt_number")),
+        scalar_value(order.get("receiptNumber")),
+        scalar_value(order.get("receipt_no")),
+        scalar_value(order.get("receiptNo")),
+        scalar_value(order.get("receipt")),
+    )
+
+    # --------------------------------------------------------
+    # 주문번호
+    # --------------------------------------------------------
+    order_number = first_nonempty(
+        scalar_value(order.get("order_number")),
+        scalar_value(order.get("orderNumber")),
+        scalar_value(order.get("order_no")),
+        scalar_value(order.get("orderNo")),
+        scalar_value(order.get("origin_order_number")),
+        scalar_value(order.get("originOrderNumber")),
+        scalar_value(order.get("orderId")),
+        scalar_value(order.get("order_id")),
+        scalar_value(order.get("idx")),
+        scalar_value(order.get("id")),
+    )
+
+    # --------------------------------------------------------
+    # 주문 상태 / 판매구분
+    # --------------------------------------------------------
+    order_type_raw = norm(first_nonempty(
+        scalar_value(order.get("order_type")),
+        scalar_value(order.get("orderType")),
+        scalar_value(order.get("type")),
+        scalar_value(order.get("status")),
+        scalar_value(order.get("order_status")),
+        scalar_value(order.get("orderStatus")),
+    ))
+
+    order_status_raw = norm(first_nonempty(
+        scalar_value(order.get("status")),
+        scalar_value(order.get("order_status")),
+        scalar_value(order.get("orderStatus")),
+        scalar_value(order.get("payment_status")),
+        scalar_value(order.get("paymentStatus")),
+    ))
+
+    combined_type = (
+        f"{order_type_raw} {order_status_raw}"
+    ).lower()
+
+    is_return_order = any(
+        word in combined_type
+        for word in (
+            "반품",
+            "환불",
+            "취소",
+            "return",
+            "refund",
+            "cancel",
         )
+    )
+
+    if not receipt:
+        receipt = find_recursive_scalar(order, ("receiptNumber", "receipt_number", "receiptNo", "receipt_no", "receipt"))
+
+    if not order_number:
+        order_number = find_recursive_scalar(order, ("orderNumber", "order_number", "orderNo", "order_no", "orderId", "order_id", "idx", "id"))
+
+    # --------------------------------------------------------
+    # 상품 목록
+    # --------------------------------------------------------
+    items = list(extract_order_items(order))
+
+    if not items:
+        return []
+
+    sales: List[Dict[str, Any]] = []
+
+    for item_pos, item in enumerate(items, start=1):
+
+        # ----------------------------------------------------
+        # 바코드
+        # ----------------------------------------------------
+        variant = as_dict(item.get("variant"))
+        product = as_dict(item.get("product"))
+        product_info = as_dict(item.get("productInfo"))
+        goods = as_dict(item.get("goods"))
+
+        barcode = first_nonempty(
+            scalar_value(item.get("barcode")),
+            scalar_value(item.get("barcode1")),
+            scalar_value(item.get("barcodeNo")),
+            scalar_value(item.get("barcode_number")),
+            scalar_value(item.get("productBarcode")),
+            scalar_value(item.get("product_barcode")),
+            scalar_value(item.get("code1")),
+            scalar_value(item.get("sku")),
+            scalar_value(item.get("itemCode")),
+
+            scalar_value(variant.get("barcode")),
+            scalar_value(variant.get("barcode1")),
+            scalar_value(variant.get("code1")),
+            scalar_value(variant.get("sku")),
+
+            scalar_value(product.get("barcode")),
+            scalar_value(product.get("barcode1")),
+            scalar_value(product.get("code1")),
+
+            scalar_value(product_info.get("barcode")),
+            scalar_value(product_info.get("code1")),
+
+            scalar_value(goods.get("barcode")),
+            scalar_value(goods.get("code1")),
+        )
+
         if not barcode:
             continue
 
+        # ----------------------------------------------------
+        # 수량
+        # ----------------------------------------------------
         qty_raw = first_nonempty(
-            item.get("qty"),
-            item.get("quantity"),
-            item.get("sales_qty"),
-            item.get("count"),
+            scalar_value(item.get("qty")),
+            scalar_value(item.get("quantity")),
+            scalar_value(item.get("sales_qty")),
+            scalar_value(item.get("salesQty")),
+            scalar_value(item.get("salesQuantity")),
+            scalar_value(item.get("count")),
+            scalar_value(item.get("ea")),
+            scalar_value(item.get("amount")),
         )
+
         try:
             qty = int(float(qty_raw or 0))
         except (ValueError, TypeError):
             qty = 0
+
+        if qty == 0:
+            continue
+
+        # ----------------------------------------------------
+        # 상품명
+        # ----------------------------------------------------
+        name = first_nonempty(
+            scalar_value(item.get("product_name")),
+            scalar_value(item.get("productName")),
+            scalar_value(item.get("name")),
+            scalar_value(item.get("itemName")),
+            scalar_value(item.get("goodsName")),
+            scalar_value(item.get("goods_name")),
+
+            scalar_value(variant.get("product_name")),
+            scalar_value(variant.get("productName")),
+            scalar_value(variant.get("name")),
+
+            scalar_value(product.get("name")),
+            scalar_value(product.get("product_name")),
+            scalar_value(product.get("productName")),
+
+            scalar_value(product_info.get("name")),
+            scalar_value(product_info.get("product_name")),
+
+            scalar_value(goods.get("name")),
+            scalar_value(goods.get("goodsName")),
+        )
+
+        # ----------------------------------------------------
+        # 옵션명
+        # ----------------------------------------------------
+        option = first_nonempty(
+            scalar_value(item.get("option_name")),
+            scalar_value(item.get("optionName")),
+            scalar_value(item.get("option")),
+            scalar_value(item.get("variant_option_name")),
+            scalar_value(item.get("variantOptionName")),
+
+            scalar_value(variant.get("option_name")),
+            scalar_value(variant.get("optionName")),
+            scalar_value(variant.get("option")),
+        )
+
+        # ----------------------------------------------------
+        # 상품별 판매구분
+        # ----------------------------------------------------
+        item_type_raw = norm(first_nonempty(
+            scalar_value(item.get("order_type")),
+            scalar_value(item.get("orderType")),
+            scalar_value(item.get("type")),
+            scalar_value(item.get("status")),
+            scalar_value(item.get("order_status")),
+            scalar_value(item.get("orderStatus")),
+            scalar_value(item.get("sale_type")),
+            scalar_value(item.get("saleType")),
+        ))
+
+        item_combined_type = (
+            f"{combined_type} {item_type_raw}"
+        ).lower()
+
+        is_return = is_return_order or any(
+            word in item_combined_type
+            for word in (
+                "반품",
+                "환불",
+                "취소",
+                "return",
+                "refund",
+                "cancel",
+            )
+        )
+
+        # 수량이 API에서 음수로 내려오는 경우
+        # 판매구분은 판매/반품으로 정규화하고 절대값을 저장한다.
+        if qty < 0:
+            is_return = True
+            qty = abs(qty)
+
         if qty <= 0:
             continue
 
-        item_type_raw = norm(first_nonempty(item.get("order_type"), item.get("type")))
-        item_is_return = is_return or any(word in item_type_raw.lower() for word in ("반품", "환불", "취소", "return", "refund", "cancel"))
-
+        # ----------------------------------------------------
+        # 상품 순번 / 상품 ID
+        # ----------------------------------------------------
         item_idx = first_nonempty(
-            item.get("idx"),
-            item.get("item_idx"),
-            item.get("order_item_idx"),
-            item_pos,
+            scalar_value(item.get("idx")),
+            scalar_value(item.get("item_idx")),
+            scalar_value(item.get("itemIdx")),
+            scalar_value(item.get("order_item_idx")),
+            scalar_value(item.get("orderItemIdx")),
+            scalar_value(item.get("line_no")),
+            scalar_value(item.get("lineNo")),
+            scalar_value(item_pos),
         )
-        name = first_nonempty(item.get("product_name"), item.get("productName"), item.get("name"))
-        option = first_nonempty(item.get("option_name"), item.get("optionName"), item.get("option"), item.get("variant_option_name"))
+
+        # ----------------------------------------------------
+        # 주문번호가 없는 특수 응답 대응
+        # ----------------------------------------------------
+        final_order_number = order_number
+
+        if not final_order_number:
+            final_order_number = first_nonempty(
+                scalar_value(item.get("order_number")),
+                scalar_value(item.get("orderNumber")),
+                scalar_value(item.get("order_no")),
+                scalar_value(item.get("orderNo")),
+            )
+
+        # ----------------------------------------------------
+        # 매장도 상품 내부에 존재할 수 있음
+        # ----------------------------------------------------
+        final_store = store_name
+
+        if not final_store:
+            item_store = as_dict(item.get("store"))
+
+            final_store = norm(first_nonempty(
+                scalar_value(item.get("store_name")),
+                scalar_value(item.get("storeName")),
+                scalar_value(item_store.get("name")),
+                scalar_value(item_store.get("store_name")),
+                scalar_value(item_store.get("storeName")),
+            ))
 
         sales.append({
             "date": order_date.strftime("%Y-%m-%d"),
-            "store": store_name,
+            "store": final_store,
             "barcode": str(barcode).strip(),
             "name": name,
             "option": option,
             "qty": qty,
             "receipt": receipt,
-            "order_number": str(order_number).strip(),
+            "order_number": str(final_order_number).strip(),
             "item_idx": str(item_idx).strip(),
-            "sale_type": "반품" if item_is_return else "판매",
-            "datetime": first_nonempty(order.get("datetime"), order.get("order_datetime"), order.get("created_at")),
+            "sale_type": "반품" if is_return else "판매",
+            "datetime": order_datetime,
         })
+
     return sales
 
 
@@ -706,7 +1300,7 @@ def checkpoint_save(task_key: str, start_date: date, end_date: date, next_page: 
 
     new_row = [task_key, start_date.isoformat(), end_date.isoformat(), next_page, status, now]
     if target:
-        ws.update(f"A{target}:F{target}", [new_row])
+        ws.update([new_row], f"A{target}:F{target}")
     else:
         ws.append_row(new_row, value_input_option="RAW")
 
@@ -792,8 +1386,21 @@ def sync_sales(session: requests.Session, sales_ws: gspread.Worksheet, existing_
 
             range_orders += len(orders)
             sales = []
-            for order in orders:
-                sales.extend(order_to_sales(order))
+
+            for order_index, order in enumerate(orders):
+                converted = order_to_sales(order)
+                sales.extend(converted)
+
+                # 첫 페이지에서 변환 실패한 주문 구조를 확인하기 위한 진단
+                if page == 1 and order_index < 3 and not converted:
+                    print("  ⚠️ 주문 변환 실패 샘플:")
+                    print(
+                        json.dumps(
+                            order,
+                            ensure_ascii=False,
+                            default=str,
+                        )[:3000]
+                    )
 
             new_count = append_sales_page(sales_ws, sales, seen)
             range_new += new_count
@@ -897,12 +1504,12 @@ def calculate_7day_velocity() -> None:
         ])
 
     ws.clear()
-    ws.update("A1", output[:1])
+    ws.update(output[:1], "A1")
     for offset in range(1, len(output), 5000):
         chunk = output[offset:offset + 5000]
         start_row = offset + 1
         end_row = start_row + len(chunk) - 1
-        ws.update(f"A{start_row}:I{end_row}", chunk)
+        ws.update(chunk, f"A{start_row}:I{end_row}")
 
     print(f"📈 판매속도 {len(output) - 1:,}개 상품 계산 완료")
 
