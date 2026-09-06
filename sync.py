@@ -652,58 +652,39 @@ def walk_dicts(value: Any) -> Iterable[Dict[str, Any]]:
 
 def looks_like_product_item(item: Dict[str, Any]) -> bool:
     """
-    이 dict가 실제 판매 상품 항목인지 판단한다.
+    Sellmate 주문 JSON에서 실제 판매 상품 line을 판별한다.
+
+    실제 응답은 product/variantInfo/productClass 같은 중첩 객체를
+    사용하는 경우가 있으므로 1-depth가 아니라 해당 dict 내부 전체를
+    재귀적으로 검사한다.
     """
-    barcode = find_first_value(
-        item,
-        (
-            "barcode",
-            "barcode1",
-            "barcodeNo",
-            "barcode_number",
-            "productBarcode",
-            "product_barcode",
-            "code1",
-            "sku",
-            "itemCode",
-        ),
+    barcode_keys = (
+        "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
+        "barcode_number", "productBarcode", "product_barcode",
+        "code1", "code2", "code3", "globalBarcode", "global_barcode",
+        "sku", "itemCode", "item_code", "variantCode", "variant_code",
+    )
+    qty_keys = (
+        "qty", "quantity", "sales_qty", "salesQty", "salesQuantity",
+        "saleQty", "sale_qty", "orderQty", "order_qty", "sellQty",
+        "sell_qty", "count", "ea", "amount", "unitQuantity",
+        "unit_quantity", "number",
+    )
+    name_keys = (
+        "product_name", "productName", "name", "itemName", "item_name",
+        "goodsName", "goods_name", "productClassName", "product_class_name",
     )
 
-    qty = find_first_value(
-        item,
-        (
-            "qty",
-            "quantity",
-            "sales_qty",
-            "salesQuantity",
-            "count",
-            "ea",
-            "amount",
-        ),
-    )
-
-    product_name = find_first_value(
-        item,
-        (
-            "product_name",
-            "productName",
-            "name",
-            "itemName",
-            "goodsName",
-            "goods_name",
-        ),
-    )
-
-    # 바코드가 있으면 가장 확실
-    if barcode:
-        return True
-
-    # 바코드가 없더라도 상품명 + 수량이 있으면 상품으로 간주
-    if product_name and qty:
-        return True
+    for obj in walk_dicts(item):
+        barcode = find_first_value(obj, barcode_keys)
+        qty = find_first_value(obj, qty_keys)
+        name = find_first_value(obj, name_keys)
+        if barcode and (qty or name):
+            return True
+        if name and qty:
+            return True
 
     return False
-
 
 def extract_product_items(order: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -774,19 +755,13 @@ def extract_product_items(order: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def extract_order_items(order: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    """
-    주문 1건에서 실제 판매 상품들을 추출한다.
-    """
+    """주문 1건에서 실제 상품 line들을 추출한다."""
     items = extract_product_items(order)
+    for item in items:
+        yield item
 
-    if items:
-        for item in items:
-            yield item
-        return
-
-    # 상품 배열을 찾지 못한 경우 주문 자체를 1개 상품으로 시도
-    yield order
-
+    if not items and looks_like_product_item(order):
+        yield order
 
 def find_recursive_scalar(data: Any, keys: Iterable[str]) -> str:
     """중첩 JSON 전체에서 후보 키의 첫 유효값을 찾는다."""
@@ -838,6 +813,9 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         scalar_value(order.get("date")),
         scalar_value(order.get("order_date")),
         scalar_value(order.get("orderDate")),
+        scalar_value(as_dict(order.get("transaction")).get("datetime")),
+        scalar_value(as_dict(order.get("transaction")).get("date")),
+        scalar_value(as_dict(order.get("transaction")).get("created_at")),
     )
 
     # 중첩된 주문 객체가 있는 경우
@@ -984,36 +962,16 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         # ----------------------------------------------------
         # 바코드
         # ----------------------------------------------------
-        variant = as_dict(item.get("variant"))
-        product = as_dict(item.get("product"))
-        product_info = as_dict(item.get("productInfo"))
-        goods = as_dict(item.get("goods"))
-
-        barcode = first_nonempty(
-            scalar_value(item.get("barcode")),
-            scalar_value(item.get("barcode1")),
-            scalar_value(item.get("barcodeNo")),
-            scalar_value(item.get("barcode_number")),
-            scalar_value(item.get("productBarcode")),
-            scalar_value(item.get("product_barcode")),
-            scalar_value(item.get("code1")),
-            scalar_value(item.get("sku")),
-            scalar_value(item.get("itemCode")),
-
-            scalar_value(variant.get("barcode")),
-            scalar_value(variant.get("barcode1")),
-            scalar_value(variant.get("code1")),
-            scalar_value(variant.get("sku")),
-
-            scalar_value(product.get("barcode")),
-            scalar_value(product.get("barcode1")),
-            scalar_value(product.get("code1")),
-
-            scalar_value(product_info.get("barcode")),
-            scalar_value(product_info.get("code1")),
-
-            scalar_value(goods.get("barcode")),
-            scalar_value(goods.get("code1")),
+        # 실제 Sellmate 응답은 variantInfo/productClass 등 여러 단계로
+        # 상품 정보가 들어올 수 있으므로 item 전체를 재귀 탐색한다.
+        barcode = find_recursive_scalar(
+            item,
+            (
+                "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
+                "barcode_number", "productBarcode", "product_barcode",
+                "code1", "code2", "code3", "globalBarcode", "global_barcode",
+                "sku", "itemCode", "item_code", "variantCode", "variant_code",
+            ),
         )
 
         if not barcode:
@@ -1022,15 +980,14 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         # ----------------------------------------------------
         # 수량
         # ----------------------------------------------------
-        qty_raw = first_nonempty(
-            scalar_value(item.get("qty")),
-            scalar_value(item.get("quantity")),
-            scalar_value(item.get("sales_qty")),
-            scalar_value(item.get("salesQty")),
-            scalar_value(item.get("salesQuantity")),
-            scalar_value(item.get("count")),
-            scalar_value(item.get("ea")),
-            scalar_value(item.get("amount")),
+        qty_raw = find_recursive_scalar(
+            item,
+            (
+                "qty", "quantity", "sales_qty", "salesQty", "salesQuantity",
+                "saleQty", "sale_qty", "orderQty", "order_qty", "sellQty",
+                "sell_qty", "count", "ea", "amount", "unitQuantity",
+                "unit_quantity", "number",
+            ),
         )
 
         try:
@@ -1044,42 +1001,24 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         # ----------------------------------------------------
         # 상품명
         # ----------------------------------------------------
-        name = first_nonempty(
-            scalar_value(item.get("product_name")),
-            scalar_value(item.get("productName")),
-            scalar_value(item.get("name")),
-            scalar_value(item.get("itemName")),
-            scalar_value(item.get("goodsName")),
-            scalar_value(item.get("goods_name")),
-
-            scalar_value(variant.get("product_name")),
-            scalar_value(variant.get("productName")),
-            scalar_value(variant.get("name")),
-
-            scalar_value(product.get("name")),
-            scalar_value(product.get("product_name")),
-            scalar_value(product.get("productName")),
-
-            scalar_value(product_info.get("name")),
-            scalar_value(product_info.get("product_name")),
-
-            scalar_value(goods.get("name")),
-            scalar_value(goods.get("goodsName")),
+        name = find_recursive_scalar(
+            item,
+            (
+                "product_name", "productName", "itemName", "item_name",
+                "goodsName", "goods_name", "productClassName",
+                "product_class_name", "name",
+            ),
         )
 
         # ----------------------------------------------------
         # 옵션명
         # ----------------------------------------------------
-        option = first_nonempty(
-            scalar_value(item.get("option_name")),
-            scalar_value(item.get("optionName")),
-            scalar_value(item.get("option")),
-            scalar_value(item.get("variant_option_name")),
-            scalar_value(item.get("variantOptionName")),
-
-            scalar_value(variant.get("option_name")),
-            scalar_value(variant.get("optionName")),
-            scalar_value(variant.get("option")),
+        option = find_recursive_scalar(
+            item,
+            (
+                "option_name", "optionName", "option",
+                "variant_option_name", "variantOptionName",
+            ),
         )
 
         # ----------------------------------------------------
