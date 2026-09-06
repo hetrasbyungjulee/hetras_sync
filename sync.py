@@ -240,6 +240,7 @@ def validate_config() -> None:
 
 def issue_external_token() -> requests.Session:
     print("🔐 Sellmate External API 토큰 발급 중...")
+
     session = requests.Session()
     session.headers.update({
         "Accept": "application/json",
@@ -247,36 +248,69 @@ def issue_external_token() -> requests.Session:
         "User-Agent": "HETRAS-Sellmate-Sync/1.0",
     })
 
-    url = f"{EXTERNAL_BASE_URL}/external/{SELLMATE_DOMAIN}/issueToken"
+    # ★ 중요: domain 없는 시스템 클라이언트 인증
+    url = f"{EXTERNAL_BASE_URL}/external/issueToken"
+
     body = {
         "client_id": int(SELLMATE_CLIENT_ID),
         "client_secret": SELLMATE_CLIENT_SECRET,
     }
 
+    print(f"  🌐 Token URL: {url}")
+    print(f"  🔑 Client ID 설정됨: {bool(SELLMATE_CLIENT_ID)}")
+    print(f"  🔐 Client Secret 설정됨: {bool(SELLMATE_CLIENT_SECRET)}")
+    print(f"  🏢 Domain: {SELLMATE_DOMAIN}")
+
     last_error = None
+
     for attempt in range(1, API_RETRY_COUNT + 1):
         try:
-            res = session.post(url, json=body, timeout=30)
+            res = session.post(
+                url,
+                json=body,
+                timeout=30,
+            )
+
             print(f"  🔑 External Token 응답: {res.status_code}")
+
             if res.status_code == 200:
                 payload = res.json()
+
                 token = first_nonempty(
-                    payload.get("access_token") if isinstance(payload, dict) else "",
-                    as_dict(payload.get("data")).get("access_token") if isinstance(payload, dict) else "",
+                    payload.get("access_token")
+                    if isinstance(payload, dict)
+                    else "",
+                    as_dict(payload.get("data")).get("access_token")
+                    if isinstance(payload, dict)
+                    else "",
                 )
+
                 if not token:
-                    fail("External API 응답에 access_token이 없습니다.")
+                    fail(
+                        "External API 토큰 발급 응답은 200이지만 "
+                        "access_token이 없습니다."
+                    )
+
                 session.headers.update({
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
                 })
+
                 print("✅ External API 토큰 발급 성공")
                 return session
+
             last_error = f"{res.status_code} {res.text[:500]}"
+
+            # 인증정보 오류는 재시도해도 의미 없음
+            if res.status_code in (400, 401, 403):
+                break
+
         except (requests.RequestException, ValueError) as exc:
             last_error = str(exc)
+
         if attempt < API_RETRY_COUNT:
             time.sleep(attempt * 2)
+
     fail(f"External API 토큰 발급 실패: {last_error}")
 
 
