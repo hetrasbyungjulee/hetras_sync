@@ -55,3 +55,13 @@ jobs:
           FORCE_SYNC: ${{ github.event.inputs.force }}
         run: |
           python sync.py
+
+      # ★★★ 동기화 성공/실패와 관계없이 Sellmate 원본 API 응답 보존
+      - name: Sellmate 원본 API 응답 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sellmate-raw-${{ github.run_number }}
+          path: raw_sellmate/**
+          if-no-files-found: warn
+          retention-days: 7
