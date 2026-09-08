@@ -904,21 +904,9 @@ def _extract_receipt_number(order: Dict[str, Any]) -> str:
 
 
 def _extract_detail_id_candidates(order: Dict[str, Any]) -> List[str]:
-    """상세 API에서 사용할 식별자 후보. 명시적 영수증번호를 최우선으로 한다."""
-    candidates: List[str] = []
+    """상세 API path에는 문서상 실제 영수증번호(receipt.number)만 사용한다."""
     receipt = _extract_receipt_number(order)
-    if receipt:
-        candidates.append(receipt)
-
-    # Sellmate 응답에 영수증번호가 아예 노출되지 않는 경우를 대비한 2차 후보.
-    # API 문서상 path 명칭은 receipt_number이므로 무작정 idx를 영수증으로 간주하지 않는다.
-    for key in ("transaction_idx", "transactionId", "transaction_id"):
-        value = order.get(key)
-        if isinstance(value, (str, int, float)) and str(value).strip():
-            candidates.append(str(value).strip())
-
-    return list(dict.fromkeys(candidates))
-
+    return [receipt] if receipt else []
 
 def _debug_receipt_candidates(order: Dict[str, Any]) -> str:
     """실제 응답에서 영수증 관련 필드명을 확인하기 위한 안전한 진단 문자열."""
@@ -999,358 +987,184 @@ def _merge_order_with_detail(order: Dict[str, Any], detail: Dict[str, Any]) -> D
     return merged
 
 
+def _pick_sellmate_barcode(barcode_obj: Dict[str, Any]) -> str:
+    """Sellmate barcode 객체에서 실제 상품 바코드를 선택한다.
+
+    code1이 사내코드(PHEKR...)이고 code2가 EAN인 상품이 있어,
+    숫자형 8~14자리 코드를 우선한다.
+    """
+    values = []
+    for key in ("code", "code1", "code2", "code3", "barcode"):
+        value = scalar_value(barcode_obj.get(key)).strip()
+        if value and value not in values:
+            values.append(value)
+    for value in values:
+        compact = value.replace(" ", "").replace("-", "")
+        if compact.isdigit() and 8 <= len(compact) <= 14:
+            return compact
+    return values[0] if values else ""
+
+
+def _sellmate_line_payload(line: Dict[str, Any]) -> Dict[str, Any]:
+    """ordered_unit / returned_unit을 동일한 상품 line 구조로 정규화한다."""
+    nested_ordered = as_dict(line.get("ordered_unit"))
+    base = nested_ordered if nested_ordered else line
+    sales_unit = as_dict(base.get("sales_unit"))
+    product_class = as_dict(sales_unit.get("product_class")) or as_dict(sales_unit.get("productClass"))
+    barcode_obj = as_dict(sales_unit.get("barcode"))
+
+    qty_raw = line.get("qty")
+    if qty_raw in (None, ""):
+        qty_raw = base.get("qty")
+    try:
+        qty = int(float(qty_raw or 0))
+    except (TypeError, ValueError):
+        qty = 0
+
+    option_names = sales_unit.get("option_names")
+    option_from_map = ""
+    if isinstance(option_names, dict):
+        option_from_map = first_nonempty(*option_names.values())
+
+    return {
+        "qty": qty,
+        "barcode": _pick_sellmate_barcode(barcode_obj),
+        "name": first_nonempty(
+            product_class.get("name"),
+            sales_unit.get("product_name"),
+            base.get("product_name"),
+        ),
+        "option": first_nonempty(
+            sales_unit.get("origin_option_name"),
+            sales_unit.get("option_name"),
+            option_from_map,
+        ),
+        # 반품 row는 returned_unit 자체 idx를 쓰고, 판매 row는 ordered_unit idx를 쓴다.
+        "item_idx": first_nonempty(line.get("idx"), base.get("idx")),
+    }
+
+
 def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Sellmate order 1건을 매출데이터 행으로 변환한다.
+    """Sellmate External /order 실제 스키마를 매출데이터 행으로 변환한다.
 
-    다양한 API 응답 필드명을 지원하며,
-    주문 안에 여러 상품이 있으면 상품별로 행을 생성한다.
+    핵심 실제 경로:
+      transaction.datetime
+      store.name
+      receipt.number
+      ordered_unit[].sales_unit.product_class.name
+      ordered_unit[].sales_unit.origin_option_name
+      ordered_unit[].sales_unit.barcode.code1/code2
+      returned_unit[].ordered_unit.sales_unit... (반품)
     """
-
-    # --------------------------------------------------------
-    # 주문일시
-    # --------------------------------------------------------
+    transaction = as_dict(order.get("transaction"))
     order_datetime = first_nonempty(
-        scalar_value(order.get("datetime")),
-        scalar_value(order.get("order_datetime")),
-        scalar_value(order.get("orderDateTime")),
-        scalar_value(order.get("ordered_at")),
-        scalar_value(order.get("orderedAt")),
-        scalar_value(order.get("created_at")),
-        scalar_value(order.get("createdAt")),
-        scalar_value(order.get("date")),
-        scalar_value(order.get("order_date")),
-        scalar_value(order.get("orderDate")),
-        scalar_value(as_dict(order.get("transaction")).get("datetime")),
-        scalar_value(as_dict(order.get("transaction")).get("date")),
-        scalar_value(as_dict(order.get("transaction")).get("created_at")),
+        transaction.get("datetime"),
+        order.get("datetime"),
+        order.get("order_datetime"),
+        transaction.get("created_at"),
+        order.get("created_at"),
     )
-
-    # 중첩된 주문 객체가 있는 경우
-    if not order_datetime:
-        nested_order = as_dict(order.get("order"))
-
-        order_datetime = first_nonempty(
-            scalar_value(nested_order.get("datetime")),
-            scalar_value(nested_order.get("order_datetime")),
-            scalar_value(nested_order.get("orderDateTime")),
-            scalar_value(nested_order.get("created_at")),
-            scalar_value(nested_order.get("createdAt")),
-            scalar_value(nested_order.get("date")),
-            scalar_value(nested_order.get("order_date")),
-            scalar_value(nested_order.get("orderDate")),
-        )
-
     order_date = parse_date(order_datetime)
-
     if not order_date:
         order_datetime = find_recursive_date(order)
         order_date = parse_date(order_datetime)
-
     if not order_date:
-        print("  ⚠️ 주문일시 필드를 찾지 못해 주문 1건을 건너뜁니다.")
         return []
 
-    # --------------------------------------------------------
-    # 매장
-    # --------------------------------------------------------
-    order_store = as_dict(order.get("store"))
+    store = as_dict(order.get("store"))
+    terminal_store = as_dict(as_dict(order.get("terminal")).get("store"))
+    store_name = norm(first_nonempty(
+        store.get("name"),
+        terminal_store.get("name"),
+        order.get("store_name"),
+        order.get("storeName"),
+    ))
 
-    store_name = first_nonempty(
-        scalar_value(order.get("store_name")),
-        scalar_value(order.get("storeName")),
-        scalar_value(order.get("store_name_ko")),
-        scalar_value(order.get("storeNameKo")),
-        scalar_value(order_store.get("name")),
-        scalar_value(order_store.get("store_name")),
-        scalar_value(order_store.get("storeName")),
-        scalar_value(order.get("shop_name")),
-        scalar_value(order.get("shopName")),
-    )
-
-    # 중첩된 매장 정보 탐색
-    if not store_name:
-        for obj in walk_dicts(order):
-            possible = first_nonempty(
-                scalar_value(obj.get("store_name")),
-                scalar_value(obj.get("storeName")),
-                scalar_value(obj.get("shop_name")),
-                scalar_value(obj.get("shopName")),
-            )
-
-            if possible:
-                store_name = possible
-                break
-
-    if not store_name:
-        store_name = norm(find_recursive_scalar(order, ("storeName", "store_name", "shopName", "shop_name")))
-    store_name = norm(store_name)
-
-    # --------------------------------------------------------
-    # 영수증 번호
-    # --------------------------------------------------------
+    # 중요: receipt 객체의 idx는 영수증번호가 아니다. number만 사용한다.
+    receipt_obj = as_dict(order.get("receipt"))
     receipt = first_nonempty(
-        scalar_value(order.get("receipt_number")),
-        scalar_value(order.get("receiptNumber")),
-        scalar_value(order.get("receipt_no")),
-        scalar_value(order.get("receiptNo")),
-        scalar_value(order.get("receipt")),
+        receipt_obj.get("number"),
+        order.get("receipt_number"),
+        order.get("receiptNumber"),
     )
 
-    # --------------------------------------------------------
-    # 주문번호
-    # --------------------------------------------------------
+    # 내부 주문 식별자는 별도 '주문번호'로 유지한다. 상세 API path에는 절대 사용하지 않는다.
     order_number = first_nonempty(
-        scalar_value(order.get("order_number")),
-        scalar_value(order.get("orderNumber")),
-        scalar_value(order.get("order_no")),
-        scalar_value(order.get("orderNo")),
-        scalar_value(order.get("origin_order_number")),
-        scalar_value(order.get("originOrderNumber")),
-        scalar_value(order.get("orderId")),
-        scalar_value(order.get("order_id")),
-        scalar_value(order.get("idx")),
-        scalar_value(order.get("id")),
+        order.get("order_number"),
+        order.get("orderNumber"),
+        order.get("origin_order_number"),
+        order.get("originOrderNumber"),
+        order.get("idx"),
     )
 
-    # --------------------------------------------------------
-    # 주문 상태 / 판매구분
-    # --------------------------------------------------------
-    order_type_raw = norm(first_nonempty(
-        scalar_value(order.get("order_type")),
-        scalar_value(order.get("orderType")),
-        scalar_value(order.get("type")),
-        scalar_value(order.get("status")),
-        scalar_value(order.get("order_status")),
-        scalar_value(order.get("orderStatus")),
-    ))
+    order_type = norm(order.get("type")).lower()
+    order_status = norm(order.get("status")).lower()
+    # 실제 raw에는 반품 주문이 type=return으로 명확히 내려온다.
+    # 원판매도 반품 처리 후 status=cancel이 될 수 있으므로 status=cancel만으로 반품 처리하지 않는다.
+    is_return_order = order_type in ("return", "refund", "반품", "환불")
+    if not order_type:
+        is_return_order = any(x in order_status for x in ("return", "refund", "반품", "환불"))
 
-    order_status_raw = norm(first_nonempty(
-        scalar_value(order.get("status")),
-        scalar_value(order.get("order_status")),
-        scalar_value(order.get("orderStatus")),
-        scalar_value(order.get("payment_status")),
-        scalar_value(order.get("paymentStatus")),
-    ))
+    ordered_lines = order.get("ordered_unit") if isinstance(order.get("ordered_unit"), list) else []
+    returned_lines = order.get("returned_unit") if isinstance(order.get("returned_unit"), list) else []
 
-    combined_type = (
-        f"{order_type_raw} {order_status_raw}"
-    ).lower()
+    # Sellmate 실제 구조를 최우선 사용한다.
+    if is_return_order:
+        raw_lines = returned_lines or ordered_lines
+    else:
+        raw_lines = ordered_lines
 
-    is_return_order = any(
-        word in combined_type
-        for word in (
-            "반품",
-            "환불",
-            "취소",
-            "return",
-            "refund",
-            "cancel",
-        )
-    )
-
-    if not receipt:
-        receipt = find_recursive_scalar(order, ("receiptNumber", "receipt_number", "receiptNo", "receipt_no", "receipt"))
-
-    if not order_number:
-        order_number = find_recursive_scalar(order, ("orderNumber", "order_number", "orderNo", "order_no", "orderId", "order_id", "idx", "id"))
-
-    # --------------------------------------------------------
-    # 상품 목록
-    # --------------------------------------------------------
-    items = list(extract_order_items(order))
-
-    # 목록 API가 주문 헤더만 반환하는 경우가 있다.
-    # 이 경우 호출부에서 _detail을 붙여준 상세 데이터까지 탐색한다.
-    if not items:
-        detail = as_dict(order.get("_detail"))
-        if detail:
-            items = list(extract_order_items(detail))
-
-    if not items:
-        return []
+    # 혹시 다른 응답 변형이 들어올 때만 기존 범용 탐색기를 보조로 사용한다.
+    if not raw_lines:
+        raw_lines = list(extract_order_items(order))
 
     sales: List[Dict[str, Any]] = []
-
-    for item_pos, item in enumerate(items, start=1):
-
-        # ----------------------------------------------------
-        # 바코드
-        # ----------------------------------------------------
-        # 실제 Sellmate 응답은 variantInfo/productClass 등 여러 단계로
-        # 상품 정보가 들어올 수 있으므로 item 전체를 재귀 탐색한다.
-        # Sellmate의 바코드는 variantInfo.barcode.code 형태일 수 있다.
-        variant_info = as_dict(item.get("variantInfo"))
-        variant = as_dict(item.get("variant"))
-        barcode_obj = as_dict(variant_info.get("barcode"))
-        variant_barcode_obj = as_dict(variant.get("barcode"))
-        barcode = first_nonempty(
-            scalar_value(barcode_obj.get("code")),
-            scalar_value(barcode_obj.get("barcode")),
-            scalar_value(variant_barcode_obj.get("code")),
-            scalar_value(variant_barcode_obj.get("barcode")),
-            scalar_value(variant_info.get("barcode")),
-            scalar_value(variant_info.get("barcode1")),
-            scalar_value(variant_info.get("barcode2")),
-            scalar_value(variant_info.get("barcode3")),
-            find_recursive_scalar(
-                item,
-                (
-                    "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
-                    "barcode_number", "productBarcode", "product_barcode",
-                    "code1", "code2", "code3", "globalBarcode", "global_barcode",
-                    "sku", "itemCode", "item_code", "variantCode", "variant_code",
-                ),
-            ),
-        )
-
-        if not barcode:
+    for pos, raw_line in enumerate(raw_lines, start=1):
+        if not isinstance(raw_line, dict):
             continue
 
-        # ----------------------------------------------------
-        # 수량
-        # ----------------------------------------------------
-        qty_raw = find_recursive_scalar(
-            item,
-            (
-                "qty", "quantity", "sales_qty", "salesQty", "salesQuantity",
-                "saleQty", "sale_qty", "orderQty", "order_qty", "sellQty",
-                "sell_qty", "count", "ea", "amount", "unitQuantity",
-                "unit_quantity", "number",
-            ),
-        )
+        # 실제 Sellmate ordered_unit/returned_unit 구조
+        if "sales_unit" in raw_line or "ordered_unit" in raw_line:
+            line = _sellmate_line_payload(raw_line)
+        else:
+            # 범용 fallback
+            qty_text = find_recursive_scalar(raw_line, ("qty", "quantity", "sales_qty", "salesQty"))
+            try:
+                qty = int(float(qty_text or 0))
+            except (TypeError, ValueError):
+                qty = 0
+            barcode = find_recursive_scalar(raw_line, ("code1", "code2", "barcode", "barcode1", "barcode2"))
+            line = {
+                "qty": qty,
+                "barcode": barcode,
+                "name": find_recursive_scalar(raw_line, ("product_name", "productName", "product_class_name", "name")),
+                "option": find_recursive_scalar(raw_line, ("origin_option_name", "option_name", "optionName")),
+                "item_idx": first_nonempty(raw_line.get("idx"), pos),
+            }
 
-        try:
-            qty = int(float(qty_raw or 0))
-        except (ValueError, TypeError):
-            qty = 0
-
+        qty = int(line.get("qty") or 0)
         if qty == 0:
             continue
 
-        # ----------------------------------------------------
-        # 상품명
-        # ----------------------------------------------------
-        name = find_recursive_scalar(
-            item,
-            (
-                "product_name", "productName", "itemName", "item_name",
-                "goodsName", "goods_name", "productClassName",
-                "product_class_name", "name",
-            ),
-        )
-
-        # ----------------------------------------------------
-        # 옵션명
-        # ----------------------------------------------------
-        option = first_nonempty(
-            scalar_value(variant_info.get("origin_option_name")),
-            scalar_value(variant_info.get("option_name")),
-            scalar_value(variant_info.get("optionName")),
-            find_recursive_scalar(
-                item,
-                (
-                    "option_name", "optionName", "option",
-                    "variant_option_name", "variantOptionName",
-                    "origin_option_name",
-                ),
-            ),
-        )
-
-        # ----------------------------------------------------
-        # 상품별 판매구분
-        # ----------------------------------------------------
-        item_type_raw = norm(first_nonempty(
-            scalar_value(item.get("order_type")),
-            scalar_value(item.get("orderType")),
-            scalar_value(item.get("type")),
-            scalar_value(item.get("status")),
-            scalar_value(item.get("order_status")),
-            scalar_value(item.get("orderStatus")),
-            scalar_value(item.get("sale_type")),
-            scalar_value(item.get("saleType")),
-        ))
-
-        item_combined_type = (
-            f"{combined_type} {item_type_raw}"
-        ).lower()
-
-        is_return = is_return_order or any(
-            word in item_combined_type
-            for word in (
-                "반품",
-                "환불",
-                "취소",
-                "return",
-                "refund",
-                "cancel",
-            )
-        )
-
-        # 수량이 API에서 음수로 내려오는 경우
-        # 판매구분은 판매/반품으로 정규화하고 절대값을 저장한다.
-        if qty < 0:
-            is_return = True
-            qty = abs(qty)
-
-        if qty <= 0:
+        # 반품 수량은 raw에서 -1로 내려오는 사례가 있으므로 시트에는 절대값 + 판매구분=반품 저장.
+        line_is_return = is_return_order or qty < 0
+        qty = abs(qty)
+        barcode = str(line.get("barcode") or "").strip()
+        if not barcode:
             continue
-
-        # ----------------------------------------------------
-        # 상품 순번 / 상품 ID
-        # ----------------------------------------------------
-        item_idx = first_nonempty(
-            scalar_value(item.get("idx")),
-            scalar_value(item.get("item_idx")),
-            scalar_value(item.get("itemIdx")),
-            scalar_value(item.get("order_item_idx")),
-            scalar_value(item.get("orderItemIdx")),
-            scalar_value(item.get("line_no")),
-            scalar_value(item.get("lineNo")),
-            scalar_value(item_pos),
-        )
-
-        # ----------------------------------------------------
-        # 주문번호가 없는 특수 응답 대응
-        # ----------------------------------------------------
-        final_order_number = order_number
-
-        if not final_order_number:
-            final_order_number = first_nonempty(
-                scalar_value(item.get("order_number")),
-                scalar_value(item.get("orderNumber")),
-                scalar_value(item.get("order_no")),
-                scalar_value(item.get("orderNo")),
-            )
-
-        # ----------------------------------------------------
-        # 매장도 상품 내부에 존재할 수 있음
-        # ----------------------------------------------------
-        final_store = store_name
-
-        if not final_store:
-            item_store = as_dict(item.get("store"))
-
-            final_store = norm(first_nonempty(
-                scalar_value(item.get("store_name")),
-                scalar_value(item.get("storeName")),
-                scalar_value(item_store.get("name")),
-                scalar_value(item_store.get("store_name")),
-                scalar_value(item_store.get("storeName")),
-            ))
 
         sales.append({
             "date": order_date.strftime("%Y-%m-%d"),
-            "store": final_store,
-            "barcode": str(barcode).strip(),
-            "name": name,
-            "option": option,
+            "store": store_name,
+            "barcode": barcode,
+            "name": str(line.get("name") or "").strip(),
+            "option": str(line.get("option") or "").strip(),
             "qty": qty,
-            "receipt": receipt,
-            "order_number": str(final_order_number).strip(),
-            "item_idx": str(item_idx).strip(),
-            "sale_type": "반품" if is_return else "판매",
-            "datetime": order_datetime,
+            "receipt": str(receipt).strip(),
+            "order_number": str(order_number).strip(),
+            "item_idx": str(line.get("item_idx") or pos).strip(),
+            "sale_type": "반품" if line_is_return else "판매",
+            "datetime": str(order_datetime).strip(),
         })
 
     return sales
