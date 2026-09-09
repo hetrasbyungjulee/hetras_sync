@@ -324,6 +324,35 @@ def ensure_worksheet(sh: gspread.Spreadsheet, title: str, rows: int, cols: int) 
     except gspread.WorksheetNotFound:
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
+def ensure_worksheet_capacity(ws: gspread.Worksheet, required_rows: int, required_cols: int = 1) -> None:
+    """Google Sheets grid이 부족하면 필요한 만큼 확장한다.
+
+    gspread의 update()는 범위가 현재 grid를 넘어가면 400 오류를 내므로,
+    대량 동기화 전에 항상 행/열 용량을 확인한다. 기존 데이터는 삭제하지 않는다.
+    """
+    required_rows = max(1, int(required_rows))
+    required_cols = max(1, int(required_cols))
+    current_rows = int(getattr(ws, "row_count", 0) or 0)
+    current_cols = int(getattr(ws, "col_count", 0) or 0)
+
+    target_rows = current_rows
+    target_cols = current_cols
+
+    if current_rows < required_rows:
+        # 매번 딱 필요한 만큼만 늘리지 않고 여유분을 둬서 다음 실행의 resize를 줄인다.
+        target_rows = max(required_rows, current_rows + 5000)
+    if current_cols < required_cols:
+        target_cols = required_cols
+
+    if target_rows != current_rows or target_cols != current_cols:
+        print(
+            f"  📐 Google Sheets grid 확장: "
+            f"{current_rows:,}행/{current_cols}열 → "
+            f"{target_rows:,}행/{target_cols}열"
+        )
+        ws.resize(rows=target_rows, cols=target_cols)
+
+
 
 def ensure_header(ws: gspread.Worksheet, header: List[str]) -> None:
     values = ws.get_all_values()
@@ -595,13 +624,24 @@ def sync_stock(session: requests.Session, store_map: Dict[str, Any]) -> bool:
         keep = []
 
     ws.clear()
-    ws.update([STOCK_HEADER], "A1")
     combined = keep + all_rows
+
+    # 헤더 1행 + 데이터 전체가 들어갈 수 있도록 먼저 grid를 확장한다.
+    ensure_worksheet_capacity(
+        ws,
+        required_rows=len(combined) + 1,
+        required_cols=len(STOCK_HEADER),
+    )
+
+    ws.update(range_name="A1", values=[STOCK_HEADER])
     for offset in range(0, len(combined), 5000):
         chunk = combined[offset:offset + 5000]
         start = offset + 2
         end = start + len(chunk) - 1
-        ws.update(chunk, f"A{start}:F{end}")
+        ws.update(
+            range_name=f"A{start}:F{end}",
+            values=chunk,
+        )
 
     print(f"✅ 재고 {len(all_rows):,}건 저장 완료")
     return True
@@ -1517,12 +1557,20 @@ def calculate_7day_velocity() -> None:
         ])
 
     ws.clear()
-    ws.update(output[:1], "A1")
+    ensure_worksheet_capacity(
+        ws,
+        required_rows=len(output),
+        required_cols=len(VELOCITY_HEADER),
+    )
+    ws.update(range_name="A1", values=output[:1])
     for offset in range(1, len(output), 5000):
         chunk = output[offset:offset + 5000]
         start_row = offset + 1
         end_row = start_row + len(chunk) - 1
-        ws.update(chunk, f"A{start_row}:I{end_row}")
+        ws.update(
+            range_name=f"A{start_row}:I{end_row}",
+            values=chunk,
+        )
 
     print(f"📈 판매속도 {len(output) - 1:,}개 상품 계산 완료")
 
