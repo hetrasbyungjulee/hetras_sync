@@ -31,10 +31,6 @@ EXTERNAL_BASE_URL = os.environ.get(
 
 PER_PAGE = int(os.environ.get("SELLMATE_PER_PAGE", "100"))
 API_RETRY_COUNT = int(os.environ.get("API_RETRY_COUNT", "3"))
-# 주문 목록 API에서 변환되지 않는 주문에 대해 /order/{receipt_number} 상세 API를
-# 자동 호출할지 여부. 기본 OFF: 현재 Sellmate에서 일부 주문이 404를 반환하여
-# 수백 건의 불필요한 상세 호출로 GitHub Actions가 취소되는 문제를 방지한다.
-ENABLE_ORDER_DETAIL_FALLBACK = os.environ.get("ENABLE_ORDER_DETAIL_FALLBACK", "false").strip().lower() in ("1", "true", "yes", "on")
 SALES_AVERAGE_DAYS = 7
 SALES_RANGE_DAYS = int(os.environ.get("SALES_RANGE_DAYS", "14"))
 SALES_HISTORY_START = os.environ.get("SALES_HISTORY_START_DATE", "2026-07-01")
@@ -285,23 +281,6 @@ def ensure_worksheet(sh: gspread.Spreadsheet, title: str, rows: int, cols: int) 
         return sh.worksheet(title)
     except gspread.WorksheetNotFound:
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
-
-
-def ensure_worksheet_capacity(ws: gspread.Worksheet, required_rows: int, required_cols: int = 1) -> None:
-    """Google Sheets grid이 부족하면 필요한 만큼 확장한다."""
-    required_rows = max(1, int(required_rows))
-    required_cols = max(1, int(required_cols))
-    current_rows = int(getattr(ws, "row_count", 0) or 0)
-    current_cols = int(getattr(ws, "col_count", 0) or 0)
-    target_rows = current_rows
-    target_cols = current_cols
-    if current_rows < required_rows:
-        target_rows = max(required_rows, current_rows + 5000)
-    if current_cols < required_cols:
-        target_cols = required_cols
-    if target_rows != current_rows or target_cols != current_cols:
-        print(f"  📐 Google Sheets grid 확장: {current_rows:,}행/{current_cols:,}열 → {target_rows:,}행/{target_cols:,}열")
-        ws.resize(rows=target_rows, cols=target_cols)
 
 
 def ensure_header(ws: gspread.Worksheet, header: List[str]) -> None:
@@ -574,14 +553,13 @@ def sync_stock(session: requests.Session, store_map: Dict[str, Any]) -> bool:
         keep = []
 
     ws.clear()
+    ws.update([STOCK_HEADER], "A1")
     combined = keep + all_rows
-    ensure_worksheet_capacity(ws, len(combined) + 1, len(STOCK_HEADER))
-    ws.update(range_name="A1", values=[STOCK_HEADER])
     for offset in range(0, len(combined), 5000):
         chunk = combined[offset:offset + 5000]
         start = offset + 2
         end = start + len(chunk) - 1
-        ws.update(range_name=f"A{start}:F{end}", values=chunk)
+        ws.update(chunk, f"A{start}:F{end}")
 
     print(f"✅ 재고 {len(all_rows):,}건 저장 완료")
     return True
@@ -673,118 +651,119 @@ def walk_dicts(value: Any) -> Iterable[Dict[str, Any]]:
 
 
 def looks_like_product_item(item: Dict[str, Any]) -> bool:
-    """주어진 dict 자체가 상품 line인지 판별한다.
-
-    부모 주문에 상품이 중첩되어 있다는 이유만으로 부모를 상품으로 오인하지 않는다.
     """
-    if not isinstance(item, dict):
-        return False
+    Sellmate 주문 JSON에서 실제 판매 상품 line을 판별한다.
 
+    실제 응답은 product/variantInfo/productClass 같은 중첩 객체를
+    사용하는 경우가 있으므로 1-depth가 아니라 해당 dict 내부 전체를
+    재귀적으로 검사한다.
+    """
+    barcode_keys = (
+        "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
+        "barcode_number", "productBarcode", "product_barcode",
+        "code1", "code2", "code3", "globalBarcode", "global_barcode",
+        "sku", "itemCode", "item_code", "variantCode", "variant_code",
+    )
     qty_keys = (
         "qty", "quantity", "sales_qty", "salesQty", "salesQuantity",
         "saleQty", "sale_qty", "orderQty", "order_qty", "sellQty",
-        "sell_qty", "count", "ea", "unitQuantity", "unit_quantity",
-    )
-    direct_barcode_keys = (
-        "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
-        "barcode_number", "productBarcode", "product_barcode",
-        "globalBarcode", "global_barcode", "sku", "itemCode", "item_code",
-        "variantCode", "variant_code", "code1", "code2", "code3",
+        "sell_qty", "count", "ea", "amount", "unitQuantity",
+        "unit_quantity", "number",
     )
     name_keys = (
-        "product_name", "productName", "itemName", "item_name",
+        "product_name", "productName", "name", "itemName", "item_name",
         "goodsName", "goods_name", "productClassName", "product_class_name",
     )
 
-    has_qty = any(scalar_value(item.get(k)) for k in qty_keys)
-    has_direct_barcode = any(scalar_value(item.get(k)) for k in direct_barcode_keys)
-    has_name = any(scalar_value(item.get(k)) for k in name_keys)
-
-    variant_info = as_dict(item.get("variantInfo"))
-    variant = as_dict(item.get("variant"))
-    product = as_dict(item.get("product"))
-    product_class = as_dict(variant_info.get("productClass"))
-
-    has_nested_barcode = bool(
-        scalar_value(as_dict(variant_info.get("barcode")).get("code"))
-        or scalar_value(as_dict(variant.get("barcode")).get("code"))
-        or scalar_value(variant_info.get("barcode"))
-        or scalar_value(variant.get("barcode"))
-    )
-    has_nested_name = bool(scalar_value(product_class.get("name"))) or bool(
-        scalar_value(product.get("name"))
-    )
-
-    # 상품 line은 수량 + (바코드 또는 상품명/variantInfo) 조합을 우선 인정한다.
-    if has_qty and (has_direct_barcode or has_nested_barcode or has_name or has_nested_name):
-        return True
-
-    # 수량이 특이한 응답이어도 명백한 variantInfo 상품 객체면 인정한다.
-    if variant_info and (has_direct_barcode or has_nested_barcode or has_nested_name):
-        return True
+    for obj in walk_dicts(item):
+        barcode = find_first_value(obj, barcode_keys)
+        qty = find_first_value(obj, qty_keys)
+        name = find_first_value(obj, name_keys)
+        if barcode and (qty or name):
+            return True
+        if name and qty:
+            return True
 
     return False
 
-
 def extract_product_items(order: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """주문 JSON에서 실제 상품 line dict만 추출한다."""
+    """
+    주문 JSON 내부에서 실제 상품 항목들을 추출한다.
+
+    Sellmate 응답 구조가 버전/계정에 따라 조금 달라도
+    가능한 한 모두 대응한다.
+    """
     candidates: List[Dict[str, Any]] = []
     seen_ids = set()
 
+    # Sellmate External API 실제 주문 응답은 상품 라인을
+    # order.ordered_unit 배열에 넣어 내려준다.
+    # 이 키를 최우선으로 처리해야 주문 전체 JSON을 상품으로
+    # 오인하거나 다른 중첩 배열을 잘못 선택하는 문제가 없다.
     preferred_keys = (
-        "items", "order_items", "orderItems", "order_details", "orderDetails",
-        "details", "products", "orderProducts", "order_products",
-        "productItems", "product_items", "goods", "goodsItems", "lines",
-        "lineItems", "salesItems", "sales_items", "saleItems", "sale_items",
+        "ordered_unit",
+        "ordered_units",
+        "orderedUnit",
+        "orderedUnits",
+        "items",
+        "order_items",
+        "orderItems",
+        "order_details",
+        "orderDetails",
+        "details",
+        "products",
+        "orderProducts",
+        "order_products",
+        "productItems",
+        "product_items",
+        "goods",
+        "goodsItems",
+        "lines",
+        "lineItems",
     )
 
     def add_candidate(item: Any) -> None:
-        if not isinstance(item, dict) or not looks_like_product_item(item):
+        if not isinstance(item, dict):
             return
+
+        if not looks_like_product_item(item):
+            return
+
         identity = id(item)
-        if identity not in seen_ids:
-            seen_ids.add(identity)
-            candidates.append(item)
 
-    def scan(value: Any, depth: int = 0) -> None:
-        if depth > 8:
+        if identity in seen_ids:
             return
-        if isinstance(value, list):
-            for x in value:
-                if isinstance(x, dict):
-                    add_candidate(x)
-                    # 상품 line 내부에 variantInfo 등이 더 있을 수 있으나
-                    # 부모 주문을 후보로 만들지 않기 위해 dict 자체만 검사한다.
-        elif isinstance(value, dict):
-            for key, child in value.items():
-                if key in preferred_keys or key in ("data", "result", "payload"):
-                    scan(child, depth + 1)
-                elif isinstance(child, dict) and key in (
-                    "order", "detail", "orderDetail", "sale", "sales",
-                ):
-                    scan(child, depth + 1)
 
-    # 명시적인 상품 배열을 먼저 탐색
+        seen_ids.add(identity)
+        candidates.append(item)
+
+    # 1차: 명시적인 상품 배열부터 찾는다.
     for key in preferred_keys:
-        if key in order:
-            scan(order.get(key), 0)
+        value = order.get(key)
 
-    # 전체 JSON에서 '상품 배열'을 재귀적으로 찾는다.
+        if isinstance(value, list):
+            for item in value:
+                # Sellmate External API의 실제 상품 line
+                # ordered_unit은 여기서 바로 상품 후보로 사용한다.
+                if key in ("ordered_unit", "ordered_units", "orderedUnit", "orderedUnits") and isinstance(item, dict):
+                    if item not in candidates:
+                        candidates.append(item)
+                else:
+                    add_candidate(item)
+
+        elif isinstance(value, dict):
+            # 상품이 한 단계 더 들어있는 경우
+            for child in walk_dicts(value):
+                add_candidate(child)
+
+    # 2차: 전체 JSON 재귀 탐색
     if not candidates:
-        def recursive_lists(value: Any, depth: int = 0) -> None:
-            if depth > 10:
-                return
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    if isinstance(child, list):
-                        # 배열 원소 자체가 상품 line인지 확인
-                        for x in child:
-                            add_candidate(x)
-                        # 중첩 배열도 계속 탐색
-                        recursive_lists(child, depth + 1)
-                    elif isinstance(child, dict):
-                        recursive_lists(child, depth + 1)
-        recursive_lists(order)
+        for item in walk_dicts(order):
+            add_candidate(item)
+
+    # 3차: 주문 자체가 상품 1건인 구조
+    if not candidates and looks_like_product_item(order):
+        candidates.append(order)
 
     return candidates
 
@@ -824,159 +803,6 @@ def find_recursive_date(data: Any) -> str:
                 if parse_date(value):
                     return value
     return ""
-
-
-
-# ============================================================
-# Order detail fallback
-# ============================================================
-_ORDER_DETAIL_CACHE: Dict[str, Any] = {}
-
-
-def _extract_receipt_number(order: Dict[str, Any]) -> str:
-    """
-    영수증번호만 추출한다.
-
-    중요:
-    scalar_value()는 dict에 idx가 있으면 idx를 반환하지만,
-    영수증번호 추출에서는 idx를 절대로 영수증번호로 취급하면 안 된다.
-    이전 코드가 receipt 객체의 idx(예: 350900)를 receipt_number로 오인해
-    /order/350900을 호출했고 Sellmate가 404를 반환했다.
-    """
-    direct_keys = (
-        "receipt_number", "receiptNumber", "receipt_no", "receiptNo",
-        "receipt_num", "receiptNum", "receipt_number_text",
-        "order_number", "orderNumber", "order_no", "orderNo",
-    )
-
-    # 1) 명시적인 영수증/주문번호 필드 우선
-    for obj in walk_dicts(order):
-        for key in direct_keys:
-            if key in obj:
-                value = obj.get(key)
-                if isinstance(value, (str, int, float)) and str(value).strip():
-                    return str(value).strip()
-                if isinstance(value, dict):
-                    # receipt/order 객체 내부에서 번호로 쓰이는 필드만 허용
-                    for subkey in (
-                        "number", "no", "receipt_number", "receiptNumber",
-                        "order_number", "orderNumber", "value", "code",
-                    ):
-                        sub = value.get(subkey)
-                        if isinstance(sub, (str, int, float)) and str(sub).strip():
-                            return str(sub).strip()
-
-    # 2) receipt 객체 자체가 별도 객체로 내려오는 경우
-    #    여기서는 idx/id를 사용하지 않는다.
-    for obj in walk_dicts(order):
-        for container_key in ("receipt", "receiptInfo", "receipt_info", "receiptData"):
-            container = obj.get(container_key)
-            if isinstance(container, dict):
-                for key in (
-                    "number", "no", "receipt_number", "receiptNumber",
-                    "order_number", "orderNumber", "value", "code",
-                ):
-                    value = container.get(key)
-                    if isinstance(value, (str, int, float)) and str(value).strip():
-                        return str(value).strip()
-
-    return ""
-
-
-def _extract_detail_id_candidates(order: Dict[str, Any]) -> List[str]:
-    """상세 API에서 사용할 식별자 후보. 명시적 영수증번호를 최우선으로 한다."""
-    candidates: List[str] = []
-    receipt = _extract_receipt_number(order)
-    if receipt:
-        candidates.append(receipt)
-
-    # Sellmate 응답에 영수증번호가 아예 노출되지 않는 경우를 대비한 2차 후보.
-    # API 문서상 path 명칭은 receipt_number이므로 무작정 idx를 영수증으로 간주하지 않는다.
-    for key in ("transaction_idx", "transactionId", "transaction_id"):
-        value = order.get(key)
-        if isinstance(value, (str, int, float)) and str(value).strip():
-            candidates.append(str(value).strip())
-
-    return list(dict.fromkeys(candidates))
-
-
-def _debug_receipt_candidates(order: Dict[str, Any]) -> str:
-    """실제 응답에서 영수증 관련 필드명을 확인하기 위한 안전한 진단 문자열."""
-    names = []
-    for obj in walk_dicts(order):
-        for key, value in obj.items():
-            key_l = str(key).lower()
-            if any(token in key_l for token in ("receipt", "order_number", "ordernumber")):
-                if isinstance(value, dict):
-                    subkeys = ",".join(str(k) for k in value.keys())
-                    names.append(f"{key}={{ {subkeys} }}")
-                else:
-                    names.append(f"{key}={str(value)[:80]}")
-    return " | ".join(names[:20]) if names else "없음"
-
-
-def _unwrap_order_detail(payload: Any) -> Dict[str, Any]:
-    """상세 API의 data/order/detail 중 실제 주문 객체를 찾아 반환."""
-    if isinstance(payload, dict):
-        # detail 응답은 data가 객체인 경우가 일반적이다.
-        for key in ("data", "order", "detail", "result"):
-            value = payload.get(key)
-            if isinstance(value, dict):
-                # 상품 배열을 가진 객체를 우선
-                if any(k in value for k in (
-                    "items", "orderItems", "order_items", "orderDetails",
-                    "order_details", "details", "products", "lines", "lineItems",
-                )):
-                    return value
-        return payload
-    return {}
-
-
-def get_order_detail(
-    session: requests.Session,
-    receipt_number: str,
-) -> Dict[str, Any]:
-    """영수증 번호로 판매 상세를 조회한다. 동일 영수증은 실행 중 캐시한다."""
-    receipt_number = str(receipt_number or "").strip()
-    if not receipt_number:
-        return {}
-    if receipt_number in _ORDER_DETAIL_CACHE:
-        cached = _ORDER_DETAIL_CACHE[receipt_number]
-        return cached if isinstance(cached, dict) else {}
-
-    url = f"{EXTERNAL_BASE_URL}/external/{SELLMATE_DOMAIN}/order/{receipt_number}"
-    last_error = ""
-    for attempt in range(1, API_RETRY_COUNT + 1):
-        try:
-            res = session.get(url, timeout=60)
-            if res.status_code == 200:
-                detail = _unwrap_order_detail(res.json())
-                _ORDER_DETAIL_CACHE[receipt_number] = detail
-                return detail
-            last_error = f"{res.status_code} {res.text[:300]}"
-            if res.status_code in (400, 401, 403, 404):
-                break
-        except (requests.RequestException, ValueError) as exc:
-            last_error = str(exc)
-        if attempt < API_RETRY_COUNT:
-            time.sleep(attempt * 1.5)
-
-    print(f"  ⚠️ 상세 조회 실패 receipt={receipt_number}: {last_error}")
-    _ORDER_DETAIL_CACHE[receipt_number] = {}
-    return {}
-
-
-def _merge_order_with_detail(order: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
-    """목록 헤더와 상세 데이터를 합친다. 상세 데이터가 상품정보를 포함하면 그대로 보존."""
-    if not detail:
-        return order
-    merged = dict(order)
-    for key, value in detail.items():
-        if key not in merged or not merged.get(key):
-            merged[key] = value
-    # 상세에 store/transaction 등이 있으면 목록 값을 우선하되 상세도 별도 키로 보존
-    merged.setdefault("_detail", detail)
-    return merged
 
 
 def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1035,6 +861,8 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
     # 매장
     # --------------------------------------------------------
     order_store = as_dict(order.get("store"))
+    terminal_obj = as_dict(order.get("terminal"))
+    terminal_store = as_dict(terminal_obj.get("store"))
 
     store_name = first_nonempty(
         scalar_value(order.get("store_name")),
@@ -1044,6 +872,11 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         scalar_value(order_store.get("name")),
         scalar_value(order_store.get("store_name")),
         scalar_value(order_store.get("storeName")),
+        scalar_value(terminal_store.get("name")),
+        scalar_value(terminal_store.get("store_name")),
+        scalar_value(terminal_store.get("storeName")),
+        scalar_value(terminal_obj.get("store_name")),
+        scalar_value(terminal_obj.get("storeName")),
         scalar_value(order.get("shop_name")),
         scalar_value(order.get("shopName")),
     )
@@ -1069,12 +902,15 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
     # --------------------------------------------------------
     # 영수증 번호
     # --------------------------------------------------------
+    receipt_obj = as_dict(order.get("receipt"))
     receipt = first_nonempty(
         scalar_value(order.get("receipt_number")),
         scalar_value(order.get("receiptNumber")),
         scalar_value(order.get("receipt_no")),
         scalar_value(order.get("receiptNo")),
-        scalar_value(order.get("receipt")),
+        scalar_value(receipt_obj.get("number")),
+        scalar_value(receipt_obj.get("receipt_number")),
+        scalar_value(receipt_obj.get("receiptNumber")),
     )
 
     # --------------------------------------------------------
@@ -1140,13 +976,6 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
     # --------------------------------------------------------
     items = list(extract_order_items(order))
 
-    # 목록 API가 주문 헤더만 반환하는 경우가 있다.
-    # 이 경우 호출부에서 _detail을 붙여준 상세 데이터까지 탐색한다.
-    if not items:
-        detail = as_dict(order.get("_detail"))
-        if detail:
-            items = list(extract_order_items(detail))
-
     if not items:
         return []
 
@@ -1159,28 +988,13 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         # ----------------------------------------------------
         # 실제 Sellmate 응답은 variantInfo/productClass 등 여러 단계로
         # 상품 정보가 들어올 수 있으므로 item 전체를 재귀 탐색한다.
-        # Sellmate의 바코드는 variantInfo.barcode.code 형태일 수 있다.
-        variant_info = as_dict(item.get("variantInfo"))
-        variant = as_dict(item.get("variant"))
-        barcode_obj = as_dict(variant_info.get("barcode"))
-        variant_barcode_obj = as_dict(variant.get("barcode"))
-        barcode = first_nonempty(
-            scalar_value(barcode_obj.get("code")),
-            scalar_value(barcode_obj.get("barcode")),
-            scalar_value(variant_barcode_obj.get("code")),
-            scalar_value(variant_barcode_obj.get("barcode")),
-            scalar_value(variant_info.get("barcode")),
-            scalar_value(variant_info.get("barcode1")),
-            scalar_value(variant_info.get("barcode2")),
-            scalar_value(variant_info.get("barcode3")),
-            find_recursive_scalar(
-                item,
-                (
-                    "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
-                    "barcode_number", "productBarcode", "product_barcode",
-                    "code1", "code2", "code3", "globalBarcode", "global_barcode",
-                    "sku", "itemCode", "item_code", "variantCode", "variant_code",
-                ),
+        barcode = find_recursive_scalar(
+            item,
+            (
+                "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
+                "barcode_number", "productBarcode", "product_barcode",
+                "code1", "code2", "code3", "globalBarcode", "global_barcode",
+                "sku", "itemCode", "item_code", "variantCode", "variant_code",
             ),
         )
 
@@ -1223,17 +1037,11 @@ def order_to_sales(order: Dict[str, Any]) -> List[Dict[str, Any]]:
         # ----------------------------------------------------
         # 옵션명
         # ----------------------------------------------------
-        option = first_nonempty(
-            scalar_value(variant_info.get("origin_option_name")),
-            scalar_value(variant_info.get("option_name")),
-            scalar_value(variant_info.get("optionName")),
-            find_recursive_scalar(
-                item,
-                (
-                    "option_name", "optionName", "option",
-                    "variant_option_name", "variantOptionName",
-                    "origin_option_name",
-                ),
+        option = find_recursive_scalar(
+            item,
+            (
+                "option_name", "optionName", "option",
+                "variant_option_name", "variantOptionName",
             ),
         )
 
@@ -1523,7 +1331,7 @@ def sync_sales(session: requests.Session, sales_ws: gspread.Worksheet, existing_
 
     while current <= today:
         end = min(current + timedelta(days=SALES_RANGE_DAYS - 1), today)
-        task_key = f"sales_v2:{SELLMATE_DOMAIN}"
+        task_key = f"sales:{SELLMATE_DOMAIN}"
         page = checkpoint_get(task_key, current, end)
         checkpoint_save(task_key, current, end, page, "진행중")
 
@@ -1542,41 +1350,20 @@ def sync_sales(session: requests.Session, sales_ws: gspread.Worksheet, existing_
             range_orders += len(orders)
             sales = []
 
-            detail_lookups = 0
-            detail_converted = 0
-
             for order_index, order in enumerate(orders):
                 converted = order_to_sales(order)
-
-                # 주문 상세 fallback은 기본적으로 비활성화한다.
-                # 현재 Sellmate의 /order/{receipt_number}가 일부 정상 목록 주문에 대해
-                # 404(No query results for model [App\Models\Order])를 반환한다.
-                # 상세 API가 필수인 환경에서만 GitHub Actions Secret/ENV에
-                # ENABLE_ORDER_DETAIL_FALLBACK=true를 지정해 활성화한다.
-                if not converted and ENABLE_ORDER_DETAIL_FALLBACK:
-                    detail_candidates = _extract_detail_id_candidates(order)
-                    for detail_id in detail_candidates:
-                        detail_lookups += 1
-                        detail = get_order_detail(session, detail_id)
-                        if detail:
-                            merged = _merge_order_with_detail(order, detail)
-                            converted = order_to_sales(merged)
-                            if converted:
-                                detail_converted += len(converted)
-                                break
-
                 sales.extend(converted)
 
-                # 최초 실패 샘플은 한 번만 출력한다.
+                # 첫 페이지에서 변환 실패한 주문 구조를 확인하기 위한 진단
                 if page == 1 and order_index < 3 and not converted:
                     print("  ⚠️ 주문 변환 실패 샘플:")
-                    print(json.dumps(order, ensure_ascii=False, default=str)[:3500])
-
-            if detail_lookups:
-                print(
-                    f"  🔍 상세 API 조회 {detail_lookups:,}건 / "
-                    f"상세에서 변환 성공 {detail_converted:,}행"
-                )
+                    print(
+                        json.dumps(
+                            order,
+                            ensure_ascii=False,
+                            default=str,
+                        )[:3000]
+                    )
 
             new_count = append_sales_page(sales_ws, sales, seen)
             range_new += new_count
@@ -1680,13 +1467,12 @@ def calculate_7day_velocity() -> None:
         ])
 
     ws.clear()
-    ensure_worksheet_capacity(ws, len(output), len(VELOCITY_HEADER))
-    ws.update(range_name="A1", values=output[:1])
+    ws.update(output[:1], "A1")
     for offset in range(1, len(output), 5000):
         chunk = output[offset:offset + 5000]
         start_row = offset + 1
         end_row = start_row + len(chunk) - 1
-        ws.update(range_name=f"A{start_row}:I{end_row}", values=chunk)
+        ws.update(chunk, f"A{start_row}:I{end_row}")
 
     print(f"📈 판매속도 {len(output) - 1:,}개 상품 계산 완료")
 
