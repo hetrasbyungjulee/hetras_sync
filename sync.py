@@ -31,6 +31,10 @@ EXTERNAL_BASE_URL = os.environ.get(
 
 PER_PAGE = int(os.environ.get("SELLMATE_PER_PAGE", "100"))
 API_RETRY_COUNT = int(os.environ.get("API_RETRY_COUNT", "3"))
+# 주문 목록 API에서 변환되지 않는 주문에 대해 /order/{receipt_number} 상세 API를
+# 자동 호출할지 여부. 기본 OFF: 현재 Sellmate에서 일부 주문이 404를 반환하여
+# 수백 건의 불필요한 상세 호출로 GitHub Actions가 취소되는 문제를 방지한다.
+ENABLE_ORDER_DETAIL_FALLBACK = os.environ.get("ENABLE_ORDER_DETAIL_FALLBACK", "false").strip().lower() in ("1", "true", "yes", "on")
 SALES_AVERAGE_DAYS = 7
 SALES_RANGE_DAYS = int(os.environ.get("SALES_RANGE_DAYS", "14"))
 SALES_HISTORY_START = os.environ.get("SALES_HISTORY_START_DATE", "2026-07-01")
@@ -1544,9 +1548,12 @@ def sync_sales(session: requests.Session, sales_ws: gspread.Worksheet, existing_
             for order_index, order in enumerate(orders):
                 converted = order_to_sales(order)
 
-                # 중요: /order 목록 API가 주문 헤더만 반환하는 경우
-                # /order/{receipt_number} 상세 API는 실제 영수증번호가 확인된 경우에만 조회한다.
-                if not converted:
+                # 주문 상세 fallback은 기본적으로 비활성화한다.
+                # 현재 Sellmate의 /order/{receipt_number}가 일부 정상 목록 주문에 대해
+                # 404(No query results for model [App\Models\Order])를 반환한다.
+                # 상세 API가 필수인 환경에서만 GitHub Actions Secret/ENV에
+                # ENABLE_ORDER_DETAIL_FALLBACK=true를 지정해 활성화한다.
+                if not converted and ENABLE_ORDER_DETAIL_FALLBACK:
                     detail_candidates = _extract_detail_id_candidates(order)
                     for detail_id in detail_candidates:
                         detail_lookups += 1
