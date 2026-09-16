@@ -552,9 +552,16 @@ def sync_stock(session: requests.Session, store_map: Dict[str, Any]) -> bool:
     else:
         keep = []
 
+    combined = keep + all_rows
+
+    # 필요한 행 수만큼 시트 크기를 먼저 확장한 뒤 전체 갱신
+    required_rows = max(2, len(combined) + 1)
+    if ws.row_count < required_rows:
+        ws.resize(rows=required_rows, cols=max(ws.col_count, len(STOCK_HEADER)))
+
     ws.clear()
     ws.update([STOCK_HEADER], "A1")
-    combined = keep + all_rows
+
     for offset in range(0, len(combined), 5000):
         chunk = combined[offset:offset + 5000]
         start = offset + 2
