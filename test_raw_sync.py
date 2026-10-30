@@ -1,7 +1,7 @@
 import copy
 import unittest
 from datetime import date
-from raw_sync import normalize_order,collect_snapshot,plan_updates,validate_snapshot
+from raw_sync import normalize_order,collect_snapshot,plan_updates,validate_snapshot,read_existing,HEADER
 from migrate_raw_daily import aggregate,source_date
 
 DAY=date(2026,10,30)
@@ -15,6 +15,15 @@ def order(qty=2,idx=1):
 class DailyTests(unittest.TestCase):
     def test_only_four_fields_are_kept(self):
         self.assertEqual(normalize_order(order())[0][2],['2026-10-30','안국','PHEKRTEST',2])
+
+    def test_quantity_reads_use_unformatted_numbers(self):
+        class Raw:
+            def get_all_values(self,**kwargs):
+                self.kwargs=kwargs
+                return [HEADER,['2026-10-30','안국','PHEKRTEST',1399]]
+        raw=Raw();existing,last=read_existing(raw)
+        self.assertEqual(raw.kwargs,{'value_render_option':'UNFORMATTED_VALUE'})
+        self.assertEqual(next(iter(existing.values()))[1][3],1399)
 
     def test_compaction_preserves_date_store_barcode_boundaries(self):
         rows=[['2026-10-29','안국','001',3],['2026-10-29','안국','001',-1],

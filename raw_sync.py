@@ -81,7 +81,7 @@ def collect_snapshot(api,start,end):
 
 
 def read_existing(raw):
-    values=raw.get_all_values()
+    values=raw.get_all_values(value_render_option='UNFORMATTED_VALUE')
     if not values or values[0]!=HEADER:
         raise RuntimeError('RAW must first be migrated to the four-column daily layout')
     existing={}

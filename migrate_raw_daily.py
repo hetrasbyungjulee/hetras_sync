@@ -99,7 +99,7 @@ def main():
             'startIndex':i,'endIndex':i+1},'properties':{'pixelSize':width},'fields':'pixelSize'}})
     # The full source has already been backed up. All transformations commit atomically.
     sh.batch_update({'requests':requests})
-    reread=sh.worksheet('raw').get_all_values()
+    reread=sh.worksheet('raw').get_all_values(value_render_option='UNFORMATTED_VALUE')
     normalized=[[r[0],r[1],r[2],number(r[3])] for r in reread[1:]]
     if reread[0]!=HEADER or normalized!=compact:
         raise RuntimeError('Post-migration verification failed; original full backup remains available')
