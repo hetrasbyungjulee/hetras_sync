@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '.github/workflows/raw-sync-check.yml'
+      - 'check_raw_projection.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -47,3 +48,4 @@ jobs:
           print("ORDER_TYPES",json.dumps([{k:o.get(k) for k in ("type","order_type","status","order_status") if k in o} for o in orders[:3]],ensure_ascii=False))
           print("READ_ONLY_CHECK_OK")
           PY
+          python -u check_raw_projection.py
