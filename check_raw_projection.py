@@ -30,7 +30,7 @@ def core(order, unit):
 
 def main():
     session = sync.issue_external_token()
-    rows = {'ordered': [], 'both': [], 'fallback': []}
+    rows = {(a,b): [] for a in (1,-1) for b in (1,-1)}
     types = Counter()
     emitted = set()
     page = 1
@@ -46,11 +46,19 @@ def main():
                 print('SCHEMA', key, json.dumps(shape(order),ensure_ascii=False))
             a = order.get('ordered_unit') or []
             b = order.get('returned_unit') or []
-            for label, units in [('ordered',a),('both',a+b),('fallback',a or b)]:
-                for unit in units:
+            for (sale_sign,return_sign), dest in rows.items():
+                for unit in a:
+                    v = core(order,unit)
+                    if order.get('status')=='cancel':
+                        v[4]*=sale_sign
+                    if v[0] in STORES:
+                        dest.append(v)
+                for returned in b:
+                    unit = dict(returned.get('ordered_unit') or {})
+                    unit['qty'] = returned['qty']*return_sign
                     v = core(order,unit)
                     if v[0] in STORES:
-                        rows[label].append(v)
+                        dest.append(v)
         if len(orders)<sync.PER_PAGE or page>=last:
             break
         page += 1
