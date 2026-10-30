@@ -1,260 +1,208 @@
-"""Incrementally mirror Sellmate orders into the existing 33-column RAW.
-
-The imported CSV through 2026-10-29 stays intact. API rows carry an opaque
-identity in the store cell's note; no extra columns or receipt alterations.
-Only complete API snapshots may change the sheet. No records/credentials are
-logged. Fields absent from the external API remain blank rather than invented.
-"""
+"""Daily SKU quantities only: date, store, barcode, signed net quantity."""
 import argparse
-import hashlib
 import json
 import os
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-KST = ZoneInfo('Asia/Seoul')
-TARGET_ID = os.environ.get('RAW_SPREADSHEET_ID', '1hGSFTLZxa9ObtDPdMtiCbxcU0GnTlsO9Xq3tMAQOuTQ')
-SEED_LAST_ROW = 225841
-SEED_END = date(2026, 10, 29)
-PREFIX = 'SELLMATE_RAW_V1:'
-STORES = {'안국', '명동', '성수', '제주', '한남', '홍대', '해운대'}
-HEADER = ['매장','단말기','영수증 번호','거래 일시','거래 구분','수령 구분',
-          '상품명','옵션명','바코드 번호','단가','수량','금액','상품 할인',
-          '할인율','할인 유형','현금','카드','포인트','쿠폰','주문 수동 할인',
-          '총 상품 금액','등급 할인','거래 시간','linePay','wechatPay','aliPay',
-          'kakaopay','naverPay','zeroPay','상품 코드','현금 영수증','수수료(원)','적립 포인트']
+KST=ZoneInfo('Asia/Seoul')
+TARGET_ID=os.environ.get('RAW_SPREADSHEET_ID','1hGSFTLZxa9ObtDPdMtiCbxcU0GnTlsO9Xq3tMAQOuTQ')
+HEADER=['판매일','매장','바코드','순판매수량']
+STORES={'안국','명동','성수','제주','한남','홍대','해운대'}
+INITIAL_END=date(2026,10,29)
+LOOKBACK_DAYS=int(os.environ.get('RAW_LOOKBACK_DAYS','7'))
+STATE_MARKER='COMPACT_RAW_STATE_V1:'
 
 
 def local_datetime(value):
-    value = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-    return value.replace(tzinfo=KST) if value.tzinfo is None else value.astimezone(KST)
+    dt=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+    return dt.replace(tzinfo=KST) if dt.tzinfo is None else dt.astimezone(KST)
 
 
 def number(value):
-    if value is None or value == '':
-        return ''
-    result = float(value)
-    if not (-1e15 < result < 1e15):
-        raise ValueError('Invalid numeric API field')
-    return int(result) if result.is_integer() else result
+    n=float(value)
+    if not -1e15<n<1e15:
+        raise ValueError('Invalid quantity')
+    return int(n) if n.is_integer() else n
 
 
 def normalize_order(order):
-    terminal = order.get('terminal') or {}
-    store = str((terminal.get('store') or order.get('store') or {}).get('name', '')).strip().removesuffix('점')
+    terminal=order.get('terminal') or {}
+    store=str((terminal.get('store') or order.get('store') or {}).get('name','')).strip().removesuffix('점')
     if store not in STORES:
         return []
-    transaction = order.get('transaction') or terminal.get('transaction') or {}
-    receipt = order.get('receipt') or terminal.get('receipt') or {}
-    dt = local_datetime(transaction.get('datetime'))
-    if order.get('idx') is None or not receipt.get('number'):
-        raise ValueError('Order identity/receipt missing; refusing incomplete import')
-    lines = [('ordered_unit', u['idx'], u, number(u['qty']), number(u.get('discount_amount',0)))
-             for u in order.get('ordered_unit') or []]
-    for returned in order.get('returned_unit') or []:
-        original = returned.get('ordered_unit') or {}
-        qty = number(returned['qty'])
-        original_qty = number(original['qty'])
-        discount = number(original.get('discount_amount',0))
-        if original_qty:
-            discount = discount * qty / original_qty
-        elif discount:
-            raise ValueError('Cannot allocate a return discount with zero original quantity')
-        lines.append(('returned_unit', returned['idx'], original, qty, number(discount)))
-    gross = sum(number(u['unit_price']) * qty for _,_,u,qty,_ in lines)
-    discounts = sum(discount for *_,discount in lines)
-    result = []
-    for group, line_id, unit, signed_qty, line_discount in lines:
-            if line_id is None:
-                raise ValueError('Order line identity missing')
-            sales = unit.get('sales_unit') or {}
-            product = sales.get('product_class') or {}
-            barcodes = sales.get('barcode') or {}
-            barcode = barcodes.get('code1') or barcodes.get('code2')
-            if not barcode:
-                raise ValueError('Order line barcode missing')
-            qty = signed_qty  # Preserve API signs for returns and return reversals.
-            price = number(unit['unit_price'])
-            options = sales.get('option_names') or {}
-            option = sales.get('origin_option_name') or ' / '.join(str(v) for v in options.values())
-            kind = {'sale':'판매','return':'반품','exchange':'교환'}.get(str(order.get('type')), str(order.get('type') or ''))
-            values = [store, terminal.get('name',''), str(receipt['number']),
-                      dt.strftime('%Y-%m-%d %H:%M:%S'), kind, '일반' if order.get('commerce_customer') is None else '',
-                      product.get('name',''), option, str(barcode), price, qty, price*qty,
-                      line_discount, number(unit.get('discount_rate')),
-                      unit.get('discount_name',''), number(order.get('cash_sales')),
-                      number(order.get('card_sales')), number(order.get('point_sales')),
-                      number(order.get('coupon_sales')), number(order.get('cart_amount_discount')),
-                      gross-discounts, number(order.get('level_discount')), dt.hour,
-                      '', '', '', '', '', '', product.get('code',''), '',
-                      number(order.get('commission_fee')), number(order.get('save_point'))]
-            identity = json.dumps([str(order['idx']), group, str(line_id)], separators=(',',':'))
-            key = hashlib.sha256(identity.encode()).hexdigest()
-            result.append((key, dt.date(), values))
+    transaction=order.get('transaction') or terminal.get('transaction') or {}
+    when=local_datetime(transaction.get('datetime')).date()
+    if order.get('idx') is None:
+        raise ValueError('Order ID missing')
+    units=[('sale',u,u) for u in order.get('ordered_unit') or []]
+    units += [('return',u,u.get('ordered_unit') or {}) for u in order.get('returned_unit') or []]
+    result=[]
+    for kind,line,product_line in units:
+        barcodes=(product_line.get('sales_unit') or {}).get('barcode') or {}
+        barcode=barcodes.get('code1') or barcodes.get('code2')
+        if not barcode or line.get('idx') is None:
+            raise ValueError('Line ID or barcode missing')
+        qty=number(line['qty'])  # Both sales and nested returns already carry CSV-compatible signs.
+        identity=(str(order['idx']),kind,str(line['idx']))
+        result.append((identity,when,[when.isoformat(),store,str(barcode),qty]))
     return result
 
 
-def collect_snapshot(api, start, end):
-    """Do not write anything until every page has been successfully read."""
-    records = {}
-    current = start
-    while current <= end:
-        page = 1
-        fingerprints = set()
+def collect_snapshot(api,start,end):
+    daily=defaultdict(int)
+    identities=set()
+    current=start
+    while current<=end:
+        page=1
+        page_ids=set()
         while True:
-            orders, last_page, page_size = api(page, current, current)
-            fingerprint = tuple(str(o.get('idx')) for o in orders)
-            if orders and fingerprint in fingerprints:
-                raise RuntimeError('API repeated a page; snapshot is incomplete')
-            fingerprints.add(fingerprint)
+            orders,last_page,page_size=api(page,current,current)
+            fingerprint=tuple(str(o.get('idx')) for o in orders)
+            if orders and fingerprint in page_ids:
+                raise RuntimeError('Repeated API page; refusing incomplete snapshot')
+            page_ids.add(fingerprint)
             for order in orders:
-                for key, when, values in normalize_order(order):
-                    if when != current:
-                        raise RuntimeError('API returned dates outside the requested day')
-                    if key in records:
+                for identity,when,row in normalize_order(order):
+                    if when!=current:
+                        raise RuntimeError('API returned an unexpected transaction date')
+                    if identity in identities:
                         raise RuntimeError('Duplicate order-line identity in API snapshot')
-                    records[key] = (when, values)
+                    identities.add(identity)
+                    daily[tuple(row[:3])]+=row[3]
             if not orders or len(orders)<page_size or page>=last_page:
                 break
-            page += 1
-            if page > 10000:
+            page+=1
+            if page>10000:
                 raise RuntimeError('API pagination limit reached')
-        current += timedelta(days=1)
-    return records
+        current+=timedelta(days=1)
+    return {key:[*key,qty] for key,qty in daily.items()}
+
+
+def read_existing(raw):
+    values=raw.get_all_values()
+    if not values or values[0]!=HEADER:
+        raise RuntimeError('RAW must first be migrated to the four-column daily layout')
+    existing={}
+    for at,row in enumerate(values[1:],2):
+        if len(row)!=4:
+            raise RuntimeError('Incomplete daily RAW row')
+        date.fromisoformat(row[0])
+        key=tuple(row[:3])
+        if key in existing:
+            raise RuntimeError('Duplicate day/store/barcode rows in RAW')
+        existing[key]=(at,[*row[:3],number(row[3])])
+    return existing,len(values)
+
+
+def validate_snapshot(snapshot,existing,start,end):
+    active_days={row[0] for _,row in existing.values()
+                 if start.isoformat()<=row[0]<=end.isoformat() and row[3]!=0}
+    actual_days={key[0] for key in snapshot}
+    if active_days-actual_days:
+        raise RuntimeError('API returned no sales for a previously populated day; keeping existing quantities')
+
+
+def plan_updates(snapshot,existing,last_row,start,end):
+    updates=[]
+    for key,row in sorted(snapshot.items()):
+        if key in existing:
+            at,old=existing[key]
+            if row!=old:
+                updates.append((at,row))
+        else:
+            last_row+=1
+            updates.append((last_row,row))
+    for key,(at,row) in existing.items():
+        if start.isoformat()<=row[0]<=end.isoformat() and key not in snapshot and row[3]!=0:
+            updates.append((at,[*row[:3],0]))
+    return sorted(updates),last_row
 
 
 def cell(value):
-    if value == '' or value is None:
-        return {}
-    return {'userEnteredValue': {'numberValue':value} if isinstance(value,(int,float))
+    return {'userEnteredValue':{'numberValue':value} if isinstance(value,(int,float))
             else {'stringValue':str(value)}}
 
 
-def row_data(key, when, values, deleted=False):
-    cells = [cell(v) for v in values]
-    cells[0]['note'] = PREFIX + json.dumps({'key':key,'date':when.isoformat(),'deleted':deleted},separators=(',',':'))
-    return {'values':cells}
-
-
-def plan_updates(snapshot, existing, last_row, start, end):
-    """Return fixed row writes, which are safe to repeat after a lost response."""
-    updates = []
-    for key,(when,values) in sorted(snapshot.items(),key=lambda x:(x[1][0],x[0])):
-        if key in existing:
-            at, old_when, old_values = existing[key]
-            if values != old_values:
-                updates.append((at,row_data(key,when,values)))
-        else:
-            last_row += 1
-            updates.append((last_row,row_data(key,when,values)))
-    for key,(at,when,values) in existing.items():
-        if start<=when<=end and key not in snapshot and values[10] != 0:
-            tombstone = list(values)
-            tombstone[4], tombstone[10], tombstone[11] = '취소', 0, 0
-            updates.append((at,row_data(key,when,tombstone,deleted=True)))
-    return sorted(updates), last_row
-
-
-def read_existing(sh, raw):
-    stores = raw.col_values(1)
-    last = len(stores)
-    if last < SEED_LAST_ROW:
-        raise RuntimeError('Imported CSV rows were removed; refusing to guess a new baseline')
-    result = {}
-    if last == SEED_LAST_ROW:
-        return result, last
-    tail = raw.get(f'A{SEED_LAST_ROW+1}:AG{last}',value_render_option='UNFORMATTED_VALUE')
-    meta = sh.fetch_sheet_metadata(params={
-        'includeGridData':True,'ranges':f"'raw'!A{SEED_LAST_ROW+1}:A{last}",
-        'fields':'sheets(data(startRow,rowData(values(note))))'})
-    notes = {}
+def get_complete_through(sh,raw,existing,end):
+    meta=sh.fetch_sheet_metadata(params={'includeGridData':True,'ranges':"'raw'!A1",
+        'fields':'sheets(data(rowData(values(note))))'})
     for sheet in meta.get('sheets',[]):
         for block in sheet.get('data',[]):
-            for i,row in enumerate(block.get('rowData',[]),block.get('startRow',0)+1):
-                notes[i] = (row.get('values') or [{}])[0].get('note','')
-    for i,values in enumerate(tail,SEED_LAST_ROW+1):
-        note = notes.get(i,'')
-        if not note.startswith(PREFIX):
-            raise RuntimeError('Untracked manual rows after CSV baseline; reconcile before syncing')
-        info = json.loads(note[len(PREFIX):])
-        key = info['key']
-        if key in result:
-            raise RuntimeError('Duplicate sync identities already exist in RAW')
-        result[key] = (i,date.fromisoformat(info['date']),list(values)+['']*(33-len(values)))
-    return result,last
+            for row in block.get('rowData',[]):
+                note=(row.get('values') or [{}])[0].get('note','')
+                if STATE_MARKER in note:
+                    data=json.loads(note.split(STATE_MARKER,1)[1])
+                    return date.fromisoformat(data['complete_through'])
+    # An absent status does not make partially written latest rows authoritative.
+    latest=max((date.fromisoformat(k[0]) for k in existing),default=INITIAL_END)
+    return min(latest-timedelta(days=1),end)
 
 
-def write_updates(sh,raw,updates,last_row):
-    if last_row > raw.row_count:
-        raise RuntimeError('RAW capacity reached. Archive history before adding rows; no records were removed')
-    for offset in range(0,len(updates),500):
-        chunk = updates[offset:offset+500]
-        requests = []
-        for at,data in chunk:
-            if requests:
-                prev = requests[-1]['updateCells']
-                if prev['start']['rowIndex']+len(prev['rows']) == at-1:
-                    prev['rows'].append(data)
-                    continue
-            requests.append({'updateCells':{'start':{'sheetId':raw.id,'rowIndex':at-1,'columnIndex':0},
-                'rows':[data],'fields':'userEnteredValue,note'}})
-        sh.batch_update({'requests':requests})
-
-
-def publish_status(sh,end,ready=False):
-    raw = sh.worksheet('raw')
-    now = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
-    status = ('자동 수집 준비 완료' if ready else '마지막 자동 수집 성공') + ' · ' + now + ' KST'
-    note = (status+'\n수집 완료일: '+end.isoformat()+' · 매일 06시경 갱신\n'
-            '2026-10-01~29 CSV 원본 유지. 2026-10-30부터 신규 API 내역 자동 추가.\n'
-            '자동 수집 시작 후 신규 행을 수동으로 섞지 마세요.\n'
-            'API가 제공하지 않는 개별 간편결제 채널/현금영수증은 공란입니다.\n'
-            '원본 33열 구성은 약 30만 행이 한도이므로 월별 이관이 필요합니다.')
-    sh.batch_update({'requests':[{'updateCells':{
-        'start':{'sheetId':raw.id,'rowIndex':0,'columnIndex':0},
+def publish_status(sh,raw,end,ready=False):
+    now=datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+    note=(('일별 집계 변환 및 자동 수집 준비 완료' if ready else '일별 집계 자동 수집 성공')+' · '+now+' KST\n'
+          '판매일·매장·바코드별 순판매수량만 누적 보관합니다. 거래별 상세 원본은 별도 백업에 있습니다.\n'
+          '매일 06시경 전일까지 수집하고 최근 7일을 재조회해 취소·반품을 반영합니다.\n'
+          '자동화가 관리하는 RAW에 수동 행을 추가하지 마세요.\n'+STATE_MARKER+
+          json.dumps({'complete_through':end.isoformat()},separators=(',',':')))
+    sh.batch_update({'requests':[{'updateCells':{'start':{'sheetId':raw.id,'rowIndex':0,'columnIndex':0},
         'rows':[{'values':[{'note':note}]}],'fields':'note'}}]})
 
 
+def write_updates(sh,raw,updates,last_row):
+    if last_row>raw.row_count:
+        rows=max(last_row+1000,raw.row_count+10000)
+        meta=sh.fetch_sheet_metadata()
+        used=sum(s['properties']['gridProperties']['rowCount']*s['properties']['gridProperties']['columnCount']
+                 for s in meta['sheets'] if s['properties'].get('sheetType')=='GRID')
+        if used+(rows-raw.row_count)*4>10000000:
+            raise RuntimeError('Spreadsheet capacity reached; archive before further collection')
+        raw.resize(rows=rows,cols=4)
+    for offset in range(0,len(updates),3000):
+        requests=[]
+        for at,row in updates[offset:offset+3000]:
+            data={'values':[cell(v) for v in row]}
+            if requests and requests[-1]['updateCells']['start']['rowIndex']+len(requests[-1]['updateCells']['rows'])==at-1:
+                requests[-1]['updateCells']['rows'].append(data)
+            else:
+                requests.append({'updateCells':{'start':{'sheetId':raw.id,'rowIndex':at-1,'columnIndex':0},
+                    'rows':[data],'fields':'userEnteredValue'}})
+        sh.batch_update({'requests':requests})
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    parser=argparse.ArgumentParser()
     parser.add_argument('--dry-run',action='store_true')
-    args = parser.parse_args()
+    args=parser.parse_args()
     import sync
-    client = sync.get_google_client()
-    sh = client.open_by_key(TARGET_ID)
-    raw = sh.worksheet('raw')
-    if raw.row_values(1) != HEADER:
-        raise RuntimeError('RAW header differs from the original CSV layout')
-    existing,last_row = read_existing(sh,raw)
-    end = datetime.now(KST).date()-timedelta(days=1)
-    latest = max((x[1] for x in existing.values()),default=SEED_END)
-    start = max(SEED_END+timedelta(days=1),min(latest,end)-timedelta(days=13))
-    if start>end:
-        if not args.dry_run:
-            publish_status(sh,end,ready=True)
-        print('RAW_READY: Imported history is current through yesterday; next run will collect the next complete day.')
+    sh=sync.get_google_client().open_by_key(TARGET_ID)
+    raw=sh.worksheet('raw')
+    existing,last=read_existing(raw)
+    end=datetime.now(KST).date()-timedelta(days=1)
+    if end<=INITIAL_END:
+        if not args.dry_run:publish_status(sh,raw,end,ready=True)
+        print('DAILY_RAW_READY: compact imported history is ready for the next complete day.')
         return
-    session = sync.issue_external_token()
+    complete=get_complete_through(sh,raw,existing,end)
+    start=max(date(2026,10,1),min(complete+timedelta(days=1),end)-timedelta(days=LOOKBACK_DAYS-1))
+    session=sync.issue_external_token()
     def api(page,start,end):
-        orders,last = sync.get_sales_page(session,page,start,end)
-        return orders,last,sync.PER_PAGE
-    snapshot = collect_snapshot(api,start,end)
-    # An empty API response must not erase previously imported rows.
-    old_active = any(start<=d<=end and v[10]!=0 for _,d,v in existing.values())
-    if not snapshot and old_active:
-        raise RuntimeError('Empty API snapshot for existing sales; refusing cancellation updates')
-    updates,new_last = plan_updates(snapshot,existing,last_row,start,end)
+        orders,last_page=sync.get_sales_page(session,page,start,end)
+        return orders,last_page,sync.PER_PAGE
+    snapshot=collect_snapshot(api,start,end)
+    validate_snapshot(snapshot,existing,start,end)
+    updates,new_last=plan_updates(snapshot,existing,last,start,end)
     if args.dry_run:
-        print('RAW_DRY_RUN_OK: API snapshot and update plan validated; no sheet writes.')
+        print('DAILY_RAW_DRY_RUN_OK: complete snapshot and update plan validated.')
         return
     write_updates(sh,raw,updates,new_last)
-    # Re-read notes to confirm writes are visible and no identity was duplicated.
-    after,actual_last = read_existing(sh,raw)
-    if actual_last!=new_last or any(k not in after or after[k][2]!=v for k,(_,v) in snapshot.items()):
-        raise RuntimeError('RAW verification mismatch; subsequent run will reconcile fixed identities')
-    publish_status(sh,end)
-    print('RAW_SYNC_OK: completed full-day sales update and verified persistent identities.')
+    after,actual_last=read_existing(raw)
+    if actual_last!=new_last or any(k not in after or after[k][1]!=v for k,v in snapshot.items()):
+        raise RuntimeError('Daily RAW verification failed; next run will reconcile fixed daily keys')
+    publish_status(sh,raw,end)
+    print('DAILY_RAW_SYNC_OK: daily SKU quantities updated and verified.')
 
 
-if __name__=='__main__':
-    main()
+if __name__=='__main__':main()

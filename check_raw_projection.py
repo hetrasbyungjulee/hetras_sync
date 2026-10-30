@@ -21,7 +21,12 @@ def main():
         seen_pages.add(fingerprint)
         for order in orders:
             for key,when,row in normalize_order(order):
-                values.append([row[0],row[2],row[3],row[8],row[10]])
+                terminal=order.get('terminal') or {}
+                receipt=order.get('receipt') or terminal.get('receipt') or {}
+                transaction=order.get('transaction') or terminal.get('transaction') or {}
+                from raw_sync import local_datetime
+                values.append([row[1],str(receipt.get('number','')),
+                    local_datetime(transaction.get('datetime')).strftime('%Y-%m-%d %H:%M:%S'),row[2],row[3]])
         if not orders or len(orders)<sync.PER_PAGE or page>=last_page:
             break
         page+=1

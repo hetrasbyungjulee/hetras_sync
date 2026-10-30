@@ -32,6 +32,14 @@ jobs:
         run: python -m unittest -v test_raw_sync.py
       - name: 패키지 설치
         run: pip install requests gspread google-auth
+      - name: 상세 원본 백업 후 일별 집계로 전환
+        if: github.event_name == 'push'
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          RAW_SPREADSHEET_ID: 1hGSFTLZxa9ObtDPdMtiCbxcU0GnTlsO9Xq3tMAQOuTQ
+          COMPACT_BACKUP_CONFIRMED: 'true'
+        run: python -u migrate_raw_daily.py
       - name: 배포 전 원본 CSV 대조
         if: github.event_name == 'push'
         env:
