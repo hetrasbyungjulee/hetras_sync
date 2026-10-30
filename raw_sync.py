@@ -49,15 +49,23 @@ def normalize_order(order):
     dt = local_datetime(transaction.get('datetime'))
     if order.get('idx') is None or not receipt.get('number'):
         raise ValueError('Order identity/receipt missing; refusing incomplete import')
-    groups = [('ordered_unit', order.get('ordered_unit') or []),
-              ('returned_unit', order.get('returned_unit') or [])]
-    all_units = [u for _, units in groups for u in units]
-    gross = sum(number(u['unit_price']) * number(u['qty']) for u in all_units)
-    discounts = sum(number(u.get('discount_amount', 0)) for u in all_units)
+    lines = [('ordered_unit', u['idx'], u, number(u['qty']), number(u.get('discount_amount',0)))
+             for u in order.get('ordered_unit') or []]
+    for returned in order.get('returned_unit') or []:
+        original = returned.get('ordered_unit') or {}
+        qty = number(returned['qty'])
+        original_qty = number(original['qty'])
+        discount = number(original.get('discount_amount',0))
+        if original_qty:
+            discount = discount * qty / original_qty
+        elif discount:
+            raise ValueError('Cannot allocate a return discount with zero original quantity')
+        lines.append(('returned_unit', returned['idx'], original, qty, number(discount)))
+    gross = sum(number(u['unit_price']) * qty for _,_,u,qty,_ in lines)
+    discounts = sum(discount for *_,discount in lines)
     result = []
-    for group, units in groups:
-        for unit in units:
-            if unit.get('idx') is None:
+    for group, line_id, unit, signed_qty, line_discount in lines:
+            if line_id is None:
                 raise ValueError('Order line identity missing')
             sales = unit.get('sales_unit') or {}
             product = sales.get('product_class') or {}
@@ -65,22 +73,22 @@ def normalize_order(order):
             barcode = barcodes.get('code1') or barcodes.get('code2')
             if not barcode:
                 raise ValueError('Order line barcode missing')
-            qty = number(unit['qty'])  # Preserve sign, including return reversals.
+            qty = signed_qty  # Preserve API signs for returns and return reversals.
             price = number(unit['unit_price'])
             options = sales.get('option_names') or {}
             option = sales.get('origin_option_name') or ' / '.join(str(v) for v in options.values())
             kind = {'sale':'판매','return':'반품','exchange':'교환'}.get(str(order.get('type')), str(order.get('type') or ''))
             values = [store, terminal.get('name',''), str(receipt['number']),
-                      dt.strftime('%Y-%m-%d %H:%M:%S'), kind, '일반',
+                      dt.strftime('%Y-%m-%d %H:%M:%S'), kind, '일반' if order.get('commerce_customer') is None else '',
                       product.get('name',''), option, str(barcode), price, qty, price*qty,
-                      number(unit.get('discount_amount')), number(unit.get('discount_rate')),
+                      line_discount, number(unit.get('discount_rate')),
                       unit.get('discount_name',''), number(order.get('cash_sales')),
                       number(order.get('card_sales')), number(order.get('point_sales')),
                       number(order.get('coupon_sales')), number(order.get('cart_amount_discount')),
                       gross-discounts, number(order.get('level_discount')), dt.hour,
                       '', '', '', '', '', '', product.get('code',''), '',
                       number(order.get('commission_fee')), number(order.get('save_point'))]
-            identity = json.dumps([str(order['idx']), group, str(unit['idx'])], separators=(',',':'))
+            identity = json.dumps([str(order['idx']), group, str(line_id)], separators=(',',':'))
             key = hashlib.sha256(identity.encode()).hexdigest()
             result.append((key, dt.date(), values))
     return result
@@ -193,6 +201,20 @@ def write_updates(sh,raw,updates,last_row):
         sh.batch_update({'requests':requests})
 
 
+def publish_status(sh,end,ready=False):
+    raw = sh.worksheet('raw')
+    now = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+    status = ('자동 수집 준비 완료' if ready else '마지막 자동 수집 성공') + ' · ' + now + ' KST'
+    note = (status+'\n수집 완료일: '+end.isoformat()+' · 매일 06시경 갱신\n'
+            '2026-10-01~29 CSV 원본 유지. 2026-10-30부터 신규 API 내역 자동 추가.\n'
+            '자동 수집 시작 후 신규 행을 수동으로 섞지 마세요.\n'
+            'API가 제공하지 않는 개별 간편결제 채널/현금영수증은 공란입니다.\n'
+            '원본 33열 구성은 약 30만 행이 한도이므로 월별 이관이 필요합니다.')
+    sh.batch_update({'requests':[{'updateCells':{
+        'start':{'sheetId':raw.id,'rowIndex':0,'columnIndex':0},
+        'rows':[{'values':[{'note':note}]}],'fields':'note'}}]})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dry-run',action='store_true')
@@ -208,6 +230,8 @@ def main():
     latest = max((x[1] for x in existing.values()),default=SEED_END)
     start = max(SEED_END+timedelta(days=1),min(latest,end)-timedelta(days=13))
     if start>end:
+        if not args.dry_run:
+            publish_status(sh,end,ready=True)
         print('RAW_READY: Imported history is current through yesterday; next run will collect the next complete day.')
         return
     session = sync.issue_external_token()
@@ -228,6 +252,7 @@ def main():
     after,actual_last = read_existing(sh,raw)
     if actual_last!=new_last or any(k not in after or after[k][2]!=v for k,(_,v) in snapshot.items()):
         raise RuntimeError('RAW verification mismatch; subsequent run will reconcile fixed identities')
+    publish_status(sh,end)
     print('RAW_SYNC_OK: completed full-day sales update and verified persistent identities.')
 
 

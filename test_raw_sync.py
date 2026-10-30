@@ -29,6 +29,26 @@ class RawTests(unittest.TestCase):
         r=normalize_order(order())[0][2]
         self.assertEqual(r[23:29],['']*6)
 
+    def test_nested_partial_return_and_its_reversal(self):
+        for raw_qty,expected in [(-1,-1),(1,1)]:
+            o=order(3,'return','cancel')
+            original=o['ordered_unit'].pop()
+            original['discount_amount']=30
+            o['returned_unit']=[{'idx':777,'qty':raw_qty,'ordered_unit':original}]
+            key,when,row=normalize_order(o)[0]
+            self.assertEqual(row[8],'PHEKRTEST')
+            self.assertEqual(row[10],expected)
+            self.assertEqual(row[12],expected*10)
+            self.assertEqual(row[20],expected*90)
+
+    def test_different_return_lines_keep_their_own_identity(self):
+        o=order(2,'return','cancel');original=o['ordered_unit'].pop()
+        o['returned_unit']=[{'idx':777,'qty':1,'ordered_unit':original},
+                            {'idx':778,'qty':1,'ordered_unit':original}]
+        r=normalize_order(o)
+        self.assertEqual(len(r),2)
+        self.assertNotEqual(r[0][0],r[1][0])
+
     def test_identity_ignores_status_quantity_changes(self):
         a=normalize_order(order())[0][0]
         b=normalize_order(order(-2,'return','cancel'))[0][0]

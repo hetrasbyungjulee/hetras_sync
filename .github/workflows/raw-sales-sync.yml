@@ -1,0 +1,62 @@
+name: 판매량 RAW 자동 수집
+
+on:
+  schedule:
+    # 매일 한국시간 06:00 (GitHub 대기열에 따라 시작이 지연될 수 있음)
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'raw_sync.py'
+      - 'test_raw_sync.py'
+      - '.github/workflows/raw-sales-sync.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hetras-sales-raw
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 중복·취소·반품 처리 검증
+        run: python -m unittest -v test_raw_sync.py
+      - name: 패키지 설치
+        run: pip install requests gspread google-auth
+      - name: 배포 전 원본 CSV 대조
+        if: github.event_name == 'push'
+        env:
+          SELLMATE_CLIENT_ID: ${{ secrets.SELLMATE_CLIENT_ID }}
+          SELLMATE_CLIENT_SECRET: ${{ secrets.SELLMATE_CLIENT_SECRET }}
+          SELLMATE_DOMAIN: ${{ secrets.SELLMATE_DOMAIN }}
+          PYTHONUNBUFFERED: '1'
+        run: python -u check_raw_projection.py
+      - name: 전일까지 RAW 수집 및 검증
+        env:
+          SELLMATE_CLIENT_ID: ${{ secrets.SELLMATE_CLIENT_ID }}
+          SELLMATE_CLIENT_SECRET: ${{ secrets.SELLMATE_CLIENT_SECRET }}
+          SELLMATE_DOMAIN: ${{ secrets.SELLMATE_DOMAIN }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          RAW_SPREADSHEET_ID: 1hGSFTLZxa9ObtDPdMtiCbxcU0GnTlsO9Xq3tMAQOuTQ
+          PYTHONUNBUFFERED: '1'
+        run: |
+          for attempt in 1 2 3; do
+            if python -u raw_sync.py; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "연결 또는 검증 실패. 저장된 거래 식별자로 중복을 방지하며 재시도합니다."
+              sleep 30
+            fi
+          done
+          exit 1
