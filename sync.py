@@ -1480,6 +1480,63 @@ def load_product_master_pcode_map() -> Dict[str, str]:
 # 7-day velocity
 # ============================================================
 
+def normalize_product_option(value: Any) -> str:
+    """옵션명 비교용 정규화: 공백/대소문자 차이만 제거."""
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def build_sales_pair_pcode_map(values: List[List[Any]], idx: Dict[str, int]) -> Tuple[Dict[Tuple[str, str], str], Dict[str, str]]:
+    """
+    매출데이터에 이미 존재하는 P코드 행을 이용해
+    (상품명 + 옵션명) -> P코드 매핑을 만든다.
+
+    같은 상품명+옵션명에 P코드가 2개 이상 존재하면 잘못 합칠 위험이 있으므로
+    그 조합은 자동 매핑하지 않는다.
+
+    이름만으로도 P코드가 정확히 1개뿐인 상품은 name_map으로 보조 매핑한다.
+    텍스타일퍼퓸처럼 같은 상품명에 여러 옵션/P코드가 있으면 이름만으로는 절대 매핑하지 않는다.
+    """
+    pair_candidates: Dict[Tuple[str, str], set] = {}
+    name_candidates: Dict[str, set] = {}
+
+    for row in values[1:]:
+        if len(row) <= max(idx.values()):
+            continue
+
+        barcode = str(row[idx["바코드"]] or "").strip()
+        if not is_p_code(barcode):
+            continue
+
+        name_key = normalize_product_name(row[idx["상품명"]])
+        option_key = normalize_product_option(row[idx["옵션명"]])
+
+        if not name_key:
+            continue
+
+        pair_key = (name_key, option_key)
+        pair_candidates.setdefault(pair_key, set()).add(barcode)
+        name_candidates.setdefault(name_key, set()).add(barcode)
+
+    pair_map: Dict[Tuple[str, str], str] = {
+        key: next(iter(codes))
+        for key, codes in pair_candidates.items()
+        if len(codes) == 1
+    }
+
+    name_map: Dict[str, str] = {
+        key: next(iter(codes))
+        for key, codes in name_candidates.items()
+        if len(codes) == 1
+    }
+
+    ambiguous_pairs = sum(1 for codes in pair_candidates.values() if len(codes) > 1)
+    print(
+        f"🧭 매출 P코드 매핑: 상품+옵션 {len(pair_map):,}건 / "
+        f"이름 단일매핑 {len(name_map):,}건 / 애매한 조합 {ambiguous_pairs:,}건"
+    )
+    return pair_map, name_map
+
+
 def calculate_7day_velocity() -> None:
     sh = open_sheet()
     try:
@@ -1507,50 +1564,81 @@ def calculate_7day_velocity() -> None:
     start = today - timedelta(days=SALES_AVERAGE_DAYS - 1)
     summary: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-    # 과거 7일 매출에 88코드가 남아 있어도 상품명 기준으로 P코드로 즉시 보정
-    product_pcode_map = load_product_master_pcode_map()
+    # 핵심:
+    # 같은 상품명에 여러 SKU가 있는 상품은 "상품명"만으로 매핑하면 오매핑된다.
+    # 따라서 기존 매출데이터의 P코드 행을 기반으로 "상품명 + 옵션명" 매핑을 최우선 사용한다.
+    pair_pcode_map, unique_name_pcode_map = build_sales_pair_pcode_map(values, idx)
+
+    remapped_count = 0
+    unmapped_legacy = {}
 
     for row in values[1:]:
         if len(row) <= max(idx.values()):
             continue
+
         d = parse_date(row[idx["날짜"]])
         if not d or d < start or d > today:
             continue
+
         store = row[idx["매장"]].strip()
         barcode = row[idx["바코드"]].strip()
         product_name = row[idx["상품명"]].strip()
+        option = row[idx["옵션명"]].strip()
 
-        # P코드가 아닌 과거 88코드는 상품마스터 상품명으로 P코드 보정
+        # 과거 88코드 → 현재 P코드 보정
+        # 1순위: 상품명 + 옵션명 정확 매핑
+        # 2순위: 해당 상품명에 P코드가 딱 1개뿐인 경우에만 이름 단독 매핑
         if barcode and not is_p_code(barcode):
-            mapped = product_pcode_map.get(normalize_product_name(product_name), "")
+            name_key = normalize_product_name(product_name)
+            option_key = normalize_product_option(option)
+
+            mapped = pair_pcode_map.get((name_key, option_key), "")
+            if not mapped:
+                mapped = unique_name_pcode_map.get(name_key, "")
+
             if mapped:
                 barcode = mapped
+                remapped_count += 1
+            else:
+                unmapped_legacy[(barcode, product_name, option)] = True
 
         if not store or not barcode:
             continue
+
         try:
             qty = int(float(row[idx["판매수량"]] or 0))
         except (ValueError, TypeError):
             qty = 0
+
         if row[idx["판매구분"]].strip() == "반품":
             qty = -qty
 
+        # 88코드와 P코드가 같은 P코드로 보정되면 여기서 자동 합산됨
         key = (store, barcode)
         if key not in summary:
             summary[key] = {
                 "store": store,
                 "barcode": barcode,
-                "name": row[idx["상품명"]],
-                "option": row[idx["옵션명"]],
+                "name": product_name,
+                "option": option,
                 "qty": 0,
             }
+
         summary[key]["qty"] += qty
+
+        # P코드 행에 옵션명이 있으면 화면용 옵션도 보강
+        if option and not summary[key].get("option"):
+            summary[key]["option"] = option
 
     output = [VELOCITY_HEADER]
     legacy_velocity = []
+
     for item in sorted(summary.values(), key=lambda x: (x["store"], x["barcode"])):
         if not is_p_code(item["barcode"]):
-            legacy_velocity.append((item["store"], item["barcode"], item["name"]))
+            legacy_velocity.append(
+                (item["store"], item["barcode"], item["name"], item.get("option", ""))
+            )
+
         qty = int(item["qty"])
         output.append([
             today.isoformat(),
@@ -1558,7 +1646,7 @@ def calculate_7day_velocity() -> None:
             item["store"],
             item["barcode"],
             item["name"],
-            item["option"],
+            item.get("option", ""),
             qty,
             round(qty / SALES_AVERAGE_DAYS, 2),
             SALES_AVERAGE_DAYS,
@@ -1566,16 +1654,19 @@ def calculate_7day_velocity() -> None:
 
     ws.clear()
     ws.update(output[:1], "A1")
+
     for offset in range(1, len(output), 5000):
         chunk = output[offset:offset + 5000]
         start_row = offset + 1
         end_row = start_row + len(chunk) - 1
         ws.update(chunk, f"A{start_row}:I{end_row}")
 
+    print(f"🔄 최근 7일 88코드 → P코드 보정 {remapped_count:,}행")
     print(f"📈 판매속도 {len(output) - 1:,}개 상품 계산 완료")
+
     if legacy_velocity:
-        print(f"⚠️ P코드로 보정하지 못한 판매속도 {len(legacy_velocity):,}건")
-        for item in legacy_velocity[:20]:
+        print(f"⚠️ 판매속도에 P코드로 보정하지 못한 상품 {len(legacy_velocity):,}건")
+        for item in legacy_velocity[:30]:
             print("   fallback:", item)
     else:
         print("✅ 판매속도 바코드 100% P코드 확인")
