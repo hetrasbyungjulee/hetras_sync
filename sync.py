@@ -41,6 +41,11 @@ STOCK_SHEET = "재고데이터"
 VELOCITY_SHEET = "판매속도"
 SYNC_LOG_SHEET = "동기화로그"
 CHECKPOINT_SHEET = "동기화체크포인트"
+CODE_MAP_SHEET = "코드매핑"
+
+# 실행 중 Sellmate 응답에서 자동 수집되는 구형바코드 -> P코드 매핑
+CODE_ALIAS_MAP: Dict[str, str] = {}
+CODE_ALIAS_CONFLICTS = set()
 
 SALES_HEADER = [
     "날짜",
@@ -797,13 +802,62 @@ def is_p_code(value: Any) -> bool:
     return bool(text) and text.upper().startswith("P")
 
 
-def find_product_code(data: Any) -> str:
+def _scalar_codes(value: Any) -> List[str]:
+    """코드 필드가 문자열/숫자/dict 어느 형태든 실제 코드값들을 뽑는다."""
+    out: List[str] = []
+
+    def add(v: Any) -> None:
+        if isinstance(v, (str, int, float)):
+            s = str(v).strip()
+            if s and s not in out:
+                out.append(s)
+
+    if isinstance(value, dict):
+        for key in (
+            "code", "code1", "code2", "code3", "code4", "code5",
+            "itemCode", "item_code", "variantCode", "variant_code",
+            "sku", "productCode", "product_code",
+        ):
+            add(value.get(key))
+    else:
+        add(value)
+
+    return out
+
+
+def register_code_alias(old_code: str, p_code: str) -> None:
     """
-    Sellmate 상품코드 결정:
-    1) itemCode / variantCode / sku / productCode 계열 중 P코드 우선
-    2) 중첩 JSON 전체에서 P로 시작하는 코드형 값 탐색
-    3) P코드가 정말 없을 때만 기존 barcode/code1 계열 fallback
+    88/구형바코드 -> P코드 매핑 저장.
+    같은 구형코드가 서로 다른 P코드와 연결되면 안전을 위해 충돌 처리한다.
     """
+    old_code = str(old_code or "").strip()
+    p_code = str(p_code or "").strip()
+
+    if not old_code or not p_code or old_code == p_code:
+        return
+    if is_p_code(old_code) or not is_p_code(p_code):
+        return
+    if old_code in CODE_ALIAS_CONFLICTS:
+        return
+
+    existing = CODE_ALIAS_MAP.get(old_code)
+    if existing and existing != p_code:
+        CODE_ALIAS_MAP.pop(old_code, None)
+        CODE_ALIAS_CONFLICTS.add(old_code)
+        print(f"⚠️ 코드매핑 충돌 제외: {old_code} -> {existing} / {p_code}")
+        return
+
+    CODE_ALIAS_MAP[old_code] = p_code
+
+
+def collect_product_codes(data: Any) -> Tuple[str, List[str]]:
+    """
+    Sellmate 상품 line 하나에서
+    현재 P코드와 함께 존재하는 기존 barcode/code1 값들을 동시에 수집한다.
+    """
+    p_code = ""
+
+    # P코드는 상품/variant 코드 계열을 우선
     p_keys = (
         "itemCode", "item_code",
         "variantCode", "variant_code",
@@ -813,26 +867,66 @@ def find_product_code(data: Any) -> str:
     )
 
     for key in p_keys:
+        if p_code:
+            break
         for obj in walk_dicts(data):
             if key in obj:
-                value = scalar_value(obj.get(key))
-                if is_p_code(value):
-                    return value
+                for value in _scalar_codes(obj.get(key)):
+                    if is_p_code(value):
+                        p_code = value
+                        break
+            if p_code:
+                break
 
-    # 혹시 P코드가 일반 code 필드에 들어오는 경우
-    for obj in walk_dicts(data):
-        for key in ("code", "code0", "code4", "code5"):
-            if key in obj:
-                value = scalar_value(obj.get(key))
-                if is_p_code(value):
-                    return value
+    # 일반 code 필드에 P코드가 있는 응답 보조
+    if not p_code:
+        for obj in walk_dicts(data):
+            for key in ("code", "code0", "code4", "code5"):
+                if key in obj:
+                    for value in _scalar_codes(obj.get(key)):
+                        if is_p_code(value):
+                            p_code = value
+                            break
+                if p_code:
+                    break
+            if p_code:
+                break
 
+    legacy_codes: List[str] = []
     legacy_keys = (
         "barcode", "barcode1", "barcode2", "barcode3", "barcodeNo",
         "barcode_number", "productBarcode", "product_barcode",
-        "code1", "code2", "code3", "globalBarcode", "global_barcode",
+        "code1", "code2", "code3",
+        "globalBarcode", "global_barcode",
     )
-    return find_recursive_scalar(data, legacy_keys)
+
+    for obj in walk_dicts(data):
+        for key in legacy_keys:
+            if key not in obj:
+                continue
+            for value in _scalar_codes(obj.get(key)):
+                if value and not is_p_code(value) and value not in legacy_codes:
+                    legacy_codes.append(value)
+
+    if p_code:
+        for old in legacy_codes:
+            register_code_alias(old, p_code)
+
+    return p_code, legacy_codes
+
+
+def find_product_code(data: Any) -> str:
+    """
+    최종 상품코드:
+    1) P코드 최우선
+    2) P코드가 없을 때만 기존 barcode/code1 fallback
+
+    동시에 같은 상품 line 안의 88코드 <-> P코드 대응을 CODE_ALIAS_MAP에 수집한다.
+    """
+    p_code, legacy_codes = collect_product_codes(data)
+    if p_code:
+        return p_code
+    return legacy_codes[0] if legacy_codes else ""
 
 
 def find_recursive_date(data: Any) -> str:
@@ -1431,6 +1525,81 @@ def sync_sales(session: requests.Session, sales_ws: gspread.Worksheet, existing_
 
 
 # ============================================================
+# 88코드 <-> P코드 영구 매핑
+# ============================================================
+
+def load_code_alias_map() -> None:
+    """
+    이전 실행에서 수집한 코드매핑 시트를 읽어 이번 실행의 메모리 매핑에 합친다.
+    """
+    sh = open_sheet()
+    try:
+        ws = sh.worksheet(CODE_MAP_SHEET)
+    except gspread.WorksheetNotFound:
+        print("ℹ️ 코드매핑 시트 없음 - 이번 실행에서 새로 생성합니다.")
+        return
+
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        return
+
+    loaded = 0
+    for row in values[1:]:
+        if len(row) < 2:
+            continue
+        old_code = str(row[0] or "").strip()
+        p_code = str(row[1] or "").strip()
+        before = CODE_ALIAS_MAP.get(old_code)
+        register_code_alias(old_code, p_code)
+        if old_code in CODE_ALIAS_MAP and CODE_ALIAS_MAP.get(old_code) != before:
+            loaded += 1
+
+    print(f"🧭 기존 코드매핑 {len(CODE_ALIAS_MAP):,}건 로드")
+
+
+def save_code_alias_map() -> None:
+    """
+    이번 실행에서 새로 발견한 매핑까지 코드매핑 시트에 안전하게 덮어쓴다.
+    충돌난 코드는 저장하지 않는다.
+    """
+    sh = open_sheet()
+    ws = ensure_worksheet(sh, CODE_MAP_SHEET, 5000, 3)
+
+    header = ["구형바코드", "P코드", "수정시간"]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = [
+        [old_code, p_code, now]
+        for old_code, p_code in sorted(CODE_ALIAS_MAP.items())
+        if old_code not in CODE_ALIAS_CONFLICTS
+    ]
+
+    ws.clear()
+    ws.update([header], "A1")
+    if rows:
+        for offset in range(0, len(rows), 5000):
+            chunk = rows[offset:offset + 5000]
+            start_row = offset + 2
+            end_row = start_row + len(chunk) - 1
+            ws.update(chunk, f"A{start_row}:C{end_row}")
+
+    print(f"💾 코드매핑 {len(rows):,}건 저장 완료")
+
+
+def code_map_needs_bootstrap() -> bool:
+    """
+    오늘 이미 동기화 완료 상태여도 코드매핑 시트가 아직 없거나 비어 있으면
+    이번 패치 적용 첫 실행은 계속 진행하도록 한다.
+    """
+    sh = open_sheet()
+    try:
+        ws = sh.worksheet(CODE_MAP_SHEET)
+        return len(ws.get_all_values()) < 2
+    except Exception:
+        return True
+
+
+# ============================================================
 # 상품마스터 P코드 보정
 # ============================================================
 
@@ -1589,12 +1758,18 @@ def calculate_7day_velocity() -> None:
         # 1순위: 상품명 + 옵션명 정확 매핑
         # 2순위: 해당 상품명에 P코드가 딱 1개뿐인 경우에만 이름 단독 매핑
         if barcode and not is_p_code(barcode):
-            name_key = normalize_product_name(product_name)
-            option_key = normalize_product_option(option)
+            # 1순위: Sellmate 동일 상품 line에서 직접 수집한 정확한 88 -> P 매핑
+            mapped = CODE_ALIAS_MAP.get(barcode, "")
 
-            mapped = pair_pcode_map.get((name_key, option_key), "")
+            # 2순위: 상품명 + 옵션명 조합
             if not mapped:
-                mapped = unique_name_pcode_map.get(name_key, "")
+                name_key = normalize_product_name(product_name)
+                option_key = normalize_product_option(option)
+                mapped = pair_pcode_map.get((name_key, option_key), "")
+
+                # 3순위: 상품명에 P코드가 딱 1개뿐인 경우만 보조
+                if not mapped:
+                    mapped = unique_name_pcode_map.get(name_key, "")
 
             if mapped:
                 barcode = mapped
@@ -1714,8 +1889,14 @@ def main() -> None:
     print("========================================")
     validate_config()
 
-    if check_daily_done():
+    # 과거 실행에서 수집한 88 -> P 매핑을 먼저 로드
+    load_code_alias_map()
+
+    already_done = check_daily_done()
+    if already_done and not code_map_needs_bootstrap():
         return
+    if already_done:
+        print("🔄 코드매핑 최초 구축을 위해 오늘 완료 상태여도 1회 재조회합니다.")
 
     session = issue_external_token()
     store_map = get_store_list(session)
@@ -1737,6 +1918,8 @@ def main() -> None:
         print("ℹ️ 체크포인트가 저장되어 다음 실행에서 중단된 페이지부터 재개합니다.")
 
     if sales_ok:
+        # Sellmate 주문/재고 응답에서 수집한 정확한 88 -> P 매핑 저장
+        save_code_alias_map()
         calculate_7day_velocity()
         write_daily_log(stock_ok, True)
         print("========================================")
